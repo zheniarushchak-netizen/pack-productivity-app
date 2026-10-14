@@ -1,284 +1,185 @@
-from __future__ import annotations
-
-import io
-import re
-from datetime import datetime
-
+"""Streamlit UI. Усі обчислення виконує packing.calculations."""
+import datetime as dt
+import hashlib
+import time
 import pandas as pd
 import streamlit as st
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
+from packing.calculations import calculate
+from packing.demo import demo_frames, as_excel
+from packing.excel import export_excel
+from packing.inputs import read_inputs, input_notes, PACK_COLUMNS, EMPLOYEE_COLUMNS
 
-
-st.set_page_config(page_title="Pack productivity", page_icon="📦", layout="wide")
-
-RED = "F8696B"
-YELLOW = "FFEB84"
-GREEN = "63BE7B"
-HEADER = "1F4E78"
-SUBHEADER = "D9EAF7"
-
-
-def clean_headers(frame: pd.DataFrame) -> pd.DataFrame:
-    result = frame.copy()
-    result.columns = (
-        result.columns.astype(str)
-        .str.replace("\n", " ", regex=False)
-        .str.replace("\r", " ", regex=False)
-        .str.replace("\xa0", " ", regex=False)
-        .str.strip()
-        .str.replace(r"\s+", " ", regex=True)
-    )
-    return result
-
-
-def normalized(value: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(value).lower())
-
-
-def find_column(columns, candidates: list[str]) -> str | None:
-    lookup = {normalized(column): column for column in columns}
-    for candidate in candidates:
-        key = normalized(candidate)
-        if key in lookup:
-            return lookup[key]
-    return None
-
-
-def read_matching_sheet(uploaded_file, required_groups: list[list[str]]) -> pd.DataFrame:
-    uploaded_file.seek(0)
-    workbook = pd.ExcelFile(uploaded_file, engine="openpyxl")
-    available = []
-
-    for sheet in workbook.sheet_names:
-        preview = clean_headers(pd.read_excel(workbook, sheet_name=sheet, nrows=3))
-        available.extend(preview.columns.tolist())
-        if all(find_column(preview.columns, group) for group in required_groups):
-            return clean_headers(pd.read_excel(workbook, sheet_name=sheet))
-
-    raise ValueError(
-        "Не знайдено аркуш із потрібними колонками. Знайдені колонки: "
-        + ", ".join(dict.fromkeys(map(str, available)))
-    )
-
-
-def parse_dates(series: pd.Series) -> pd.Series:
-    parsed = pd.to_datetime(series, errors="coerce", dayfirst=True)
-    if parsed.notna().sum() == 0:
-        parsed = pd.to_datetime(series, errors="coerce")
-    return parsed
-
-
-def norm_for_days(days: pd.Series) -> pd.Series:
-    return pd.Series(
-        pd.cut(
-            days,
-            bins=[-float("inf"), 6, 13, 20, float("inf")],
-            labels=[140, 180, 220, 260],
-        ).astype(int),
-        index=days.index,
-    )
-
-
-def station_key(value: object) -> tuple:
-    text = str(value)
-    numbers = tuple(int(number) for number in re.findall(r"\d+", text))
-    return numbers, text
-
-
-def build_report(pack_file, employees_file) -> tuple[pd.DataFrame, list[str], datetime]:
-    pack = read_matching_sheet(
-        pack_file,
-        [
-            ["Operator"],
-            ["Packing station", "Packing workstation"],
-            ["Operation time", "Operation date"],
-        ],
-    )
-    employees = read_matching_sheet(
-        employees_file,
-        [["Employee ID", "EmployeeID"], ["Create time", "Creation time"]],
-    )
-
-    operator_col = find_column(pack.columns, ["Operator"])
-    station_col = find_column(pack.columns, ["Packing station", "Packing workstation"])
-    operation_col = find_column(pack.columns, ["Operation time", "Operation date"])
-    employee_id_col = find_column(employees.columns, ["Employee ID", "EmployeeID"])
-    create_col = find_column(employees.columns, ["Create time", "Creation time"])
-
-    pack = pack[[operator_col, station_col, operation_col]].copy()
-    pack.columns = ["Operator raw", "Station", "Operation time"]
-    employees = employees[[employee_id_col, create_col]].copy()
-    employees.columns = ["Employee ID", "Create time"]
-
-    pack["Employee ID"] = (
-        pack["Operator raw"].astype(str).str.extract(r"\((\d+)\)")[0].astype("string")
-    )
-    pack["Employee"] = (
-        pack["Operator raw"].astype(str).str.replace(r"\s*\(\d+\)\s*$", "", regex=True).str.strip()
-    )
-    pack["Operation time"] = parse_dates(pack["Operation time"])
-    pack = pack.dropna(subset=["Employee ID", "Station", "Operation time"])
-    if pack.empty:
-        raise ValueError("Після обробки не залишилося рядків із працівником, станцією та часом.")
-
-    employees["Employee ID"] = (
-        employees["Employee ID"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
-    )
-    employees["Create time"] = parse_dates(employees["Create time"])
-    employees = employees.drop_duplicates("Employee ID", keep="last")
-
-    report_date = pack["Operation time"].max().normalize()
-    pack["Hour"] = pack["Operation time"].dt.floor("h").dt.strftime("%H:%M")
-    pack = pack.merge(employees, on="Employee ID", how="left")
-    pack["Days worked"] = (report_date - pack["Create time"].dt.normalize()).dt.days
-    pack["Days worked"] = pack["Days worked"].fillna(9999).clip(lower=0)
-    pack["Norm"] = norm_for_days(pack["Days worked"])
-
-    grouped = (
-        pack.groupby(["Station", "Employee", "Employee ID", "Norm", "Hour"], dropna=False)
-        .size()
-        .rename("Quantity")
-        .reset_index()
-    )
-    grouped["Percent"] = grouped["Quantity"] / grouped["Norm"]
-
-    quantity = grouped.pivot_table(
-        index=["Station", "Employee", "Employee ID", "Norm"],
-        columns="Hour",
-        values="Quantity",
-        aggfunc="sum",
-        fill_value=0,
-    )
-    percent = grouped.pivot_table(
-        index=["Station", "Employee", "Employee ID", "Norm"],
-        columns="Hour",
-        values="Percent",
-        aggfunc="sum",
-        fill_value=0,
-    )
-
-    hours = sorted(grouped["Hour"].unique())
-    result = quantity.reset_index()
-    result["Total"] = result[hours].sum(axis=1)
-    base = result[["Station", "Employee", "Employee ID", "Norm", "Total"]].copy()
-    for hour in hours:
-        base[f"{hour} Quantity"] = quantity[hour].to_numpy()
-        base[f"{hour} Percent"] = percent[hour].to_numpy()
-
-    order = sorted(range(len(base)), key=lambda i: (station_key(base.iloc[i]["Station"]), base.iloc[i]["Employee"]))
-    base = base.iloc[order].reset_index(drop=True)
-    return base, hours, report_date.to_pydatetime()
-
-
-def color_for_percent(value: float, yellow_from: float) -> str:
-    percentage = value * 100
-    if percentage >= 100:
-        return GREEN
-    if percentage >= yellow_from:
-        return YELLOW
-    return RED
-
-
-def to_excel(report: pd.DataFrame, hours: list[str], report_date: datetime, yellow_from: float) -> bytes:
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        report.to_excel(writer, sheet_name="Report", index=False, startrow=2)
-        worksheet = writer.book["Report"]
-        worksheet["A1"] = "Pack productivity report"
-        worksheet["A2"] = f"Report date: {report_date:%d.%m.%Y}"
-        worksheet["A1"].font = Font(size=16, bold=True, color="FFFFFF")
-        worksheet["A1"].fill = PatternFill("solid", fgColor=HEADER)
-        worksheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(report.columns))
-
-        for cell in worksheet[3]:
-            cell.font = Font(bold=True, color="FFFFFF")
-            cell.fill = PatternFill("solid", fgColor=HEADER)
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-        percent_columns = [i + 1 for i, name in enumerate(report.columns) if name.endswith(" Percent")]
-        for row in range(4, worksheet.max_row + 1):
-            for column in percent_columns:
-                cell = worksheet.cell(row=row, column=column)
-                cell.number_format = "0%"
-                cell.fill = PatternFill("solid", fgColor=color_for_percent(float(cell.value or 0), yellow_from))
-                cell.alignment = Alignment(horizontal="center")
-
-        widths = {1: 18, 2: 28, 3: 14, 4: 10, 5: 12}
-        for column in range(1, worksheet.max_column + 1):
-            worksheet.column_dimensions[get_column_letter(column)].width = widths.get(column, 14)
-        worksheet.freeze_panes = "F4"
-        worksheet.auto_filter.ref = f"A3:{get_column_letter(worksheet.max_column)}{worksheet.max_row}"
-
-        rules = pd.DataFrame(
-            {
-                "Days worked": ["0–6", "7–13", "14–20", "21+"],
-                "Hourly norm": [140, 180, 220, 260],
-            }
-        )
-        rules.to_excel(writer, sheet_name="Norms", index=False)
-        norms_sheet = writer.book["Norms"]
-        norms_sheet["D1"] = "Color"
-        norms_sheet["E1"] = "Meaning"
-        legend = [(RED, f"Below {yellow_from:.0f}%"), (YELLOW, f"{yellow_from:.0f}%–99%"), (GREEN, "100% or more")]
-        for row, (color, meaning) in enumerate(legend, start=2):
-            norms_sheet.cell(row=row, column=4).fill = PatternFill("solid", fgColor=color)
-            norms_sheet.cell(row=row, column=5, value=meaning)
-
-    return output.getvalue()
-
-
-st.title("📦 Pack productivity")
-st.write("Завантажте два Excel-файли. Один рядок у Pack data рахується як один виконаний бокс.")
+st.set_page_config(page_title="Pack Analytics · Звіт зміни", page_icon="📦", layout="wide")
+st.markdown('''<style>
+.block-container {padding-top:2.2rem; padding-bottom:3rem; max-width:1600px}
+h1,h2,h3 {letter-spacing:-.035em}
+[data-testid="stMetric"] {background:white;border:1px solid #E1E7EF;border-radius:14px;padding:18px 20px}
+[data-testid="stMetricLabel"] {color:#64748B}
+[data-testid="stMetricValue"] {font-weight:700}
+.hero {background:linear-gradient(120deg,#112B40,#164D59);color:white;border-radius:20px;padding:30px 34px;margin-bottom:24px}
+.hero h1 {color:white;margin:8px 0;font-size:2.5rem}
+.hero p {color:#BFD8E0;margin-bottom:0;max-width:750px}
+.eyebrow {font-size:.75rem;letter-spacing:.17em;text-transform:uppercase;color:#8FE0D3;font-weight:700}
+[data-testid="stTabs"] [data-baseweb="tab-list"] {gap:18px}
+[data-testid="stTabs"] [data-baseweb="tab"] {font-weight:600}
+</style>''', unsafe_allow_html=True)
+st.markdown('''<div class="hero"><div class="eyebrow">Operations intelligence / Test edition</div>
+<h1>Pack Analytics</h1><p>Уся зміна в одному місці. Обсяги пакування, продуктивність команди та завантаження ліній.</p></div>''', unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("Налаштування")
-    yellow_from = st.number_input(
-        "Жовтий колір від, %",
-        min_value=1,
-        max_value=99,
-        value=80,
-        step=1,
-        help="100% і більше завжди позначається зеленим.",
-    )
-    st.caption("Норми: 140 / 180 / 220 / 260 залежно від стажу.")
+    st.markdown("### 📦 Pack Analytics")
+    st.caption("РОБОЧИЙ ПРОСТІР ЗМІНИ")
+    mode = st.radio("Джерело даних", ["Демонстрація", "Мої Excel-файли"])
+    pack_file = employee_file = None
+    night = extended = False
+    if mode == "Демонстрація":
+        st.info("Вигадані дані · 12 операторів")
+        night = st.toggle("Нічна зміна")
+        extended = st.toggle("Продовжена зміна")
+    else:
+        pack_file = st.file_uploader("1. Операції пакування", type=["xlsx"], key="pack_upload")
+        employee_file = st.file_uploader("2. Довідник працівників", type=["xlsx"], key="employees_upload")
+        st.caption("Наприклад: Pack_data.xlsx та InfUser.xlsx. Читається перший аркуш кожного файлу.")
+    run = st.button("Сформувати звіт", type="primary", use_container_width=True)
+    st.divider()
+    st.caption("Логіка оригіналу")
+    st.markdown("**120 / 260 / 315** — базові норми\n\n**>15** — поріг активної години\n\n**>100** — поріг звіту працівників")
+    st.caption("Стаж обчислюється на поточну дату сервера, як у вихідному коді.")
 
-left, right = st.columns(2)
-with left:
-    pack_file = st.file_uploader("1. Pack data", type=["xlsx", "xlsm"])
-with right:
-    employees_file = st.file_uploader("2. Employees", type=["xlsx", "xlsm"])
+if mode == "Мої Excel-файли" and (pack_file is None or employee_file is None):
+    st.info("Завантажте обидва Excel-файли зліва та натисніть «Сформувати звіт».")
+    with st.expander("Які колонки потрібні?", expanded=True):
+        c1, c2 = st.columns(2)
+        c1.markdown("**Операції пакування**\n\n" + "\n".join(f"- `{c}`" for c in PACK_COLUMNS))
+        c2.markdown("**Довідник працівників**\n\n" + "\n".join(f"- `{c}`" for c in EMPLOYEE_COLUMNS))
+        st.caption("Operator має містити ID у дужках, наприклад Оператор (1001). Завантажуйте дані однієї зміни.")
+    st.stop()
 
-if st.button("Створити звіт", type="primary", disabled=not (pack_file and employees_file)):
+if mode == "Демонстрація":
+    fingerprint = f"demo-{night}-{extended}-{dt.date.today()}"
+else:
+    pack_bytes, employee_bytes = pack_file.getvalue(), employee_file.getvalue()
+    fingerprint = hashlib.sha256(pack_bytes + employee_bytes + str(dt.date.today()).encode()).hexdigest()
+
+if run or (mode == "Демонстрація" and st.session_state.get("fingerprint") != fingerprint):
+    st.session_state.pop("result", None)
+    st.session_state.pop("fingerprint", None)
     try:
-        with st.spinner("Обробляю дані…"):
-            report, hours, report_date = build_report(pack_file, employees_file)
-            excel = to_excel(report, hours, report_date, float(yellow_from))
-        st.session_state["report"] = report
-        st.session_state["excel"] = excel
-        st.session_state["report_date"] = report_date
-        st.success(f"Готово: {len(report)} працівників, {len(hours)} часових колонок.")
-    except Exception as error:
-        st.error(str(error))
+        with st.spinner("Обчислюємо показники та готуємо Excel…"):
+            started = time.perf_counter()
+            pack, employees = demo_frames(night, extended) if mode == "Демонстрація" else read_inputs(pack_bytes, employee_bytes)
+            notes = input_notes(pack, employees)
+            result = calculate(pack, employees)
+            excel = export_excel(result["tables"])
+            st.session_state.update(result=result, excel=excel, notes=notes,
+                                    elapsed=time.perf_counter()-started, fingerprint=fingerprint)
+    except Exception as exc:
+        st.error("Не вдалося сформувати звіт для цих даних. Перевірте формат колонок і склад зміни.")
+        st.caption("Оригінальний алгоритм очікує наявність Single і Multi та придатних даних для погодинних звітів. Формули автоматично не змінюються.")
+        with st.expander("Деталі помилки"):
+            st.code(f"{type(exc).__name__}: {exc}")
+        st.stop()
 
-if "report" in st.session_state:
-    report = st.session_state["report"]
-    percent_columns = [column for column in report.columns if column.endswith(" Percent")]
+if st.session_state.get("fingerprint") != fingerprint or "result" not in st.session_state:
+    st.info("Файли готові. Натисніть «Сформувати звіт», щоб розрахувати нові дані.")
+    st.stop()
 
-    def highlight(value):
-        try:
-            color = color_for_percent(float(value), float(yellow_from))
-            return f"background-color: #{color}; color: #111111"
-        except (TypeError, ValueError):
-            return ""
+result = st.session_state.result
+tables = result["tables"]
+for note in st.session_state.notes:
+    st.warning(note)
 
-    formatters = {column: "{:.0%}" for column in percent_columns}
-    styled = report.style.format(formatters).map(highlight, subset=percent_columns)
-    st.dataframe(styled, use_container_width=True, height=520, hide_index=True)
-    st.download_button(
-        "Завантажити Pack_report.xlsx",
-        data=st.session_state["excel"],
-        file_name=f"Pack_report_{st.session_state['report_date']:%Y-%m-%d}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-    )
+left, right = st.columns([3, 1])
+with left:
+    shift = "Нічна" if result["night"] else "Денна"
+    st.subheader(f"Звіт зміни · {shift}")
+    st.caption(f"{'ДЕМОНСТРАЦІЯ · ' if mode == 'Демонстрація' else ''}{'Продовжена зміна · ' if result['extended'] else ''}Дата розрахунку: {result['calculated_on']} · {len(result['hours'])} годин у звіті · {st.session_state.elapsed:.1f} с")
+with right:
+    st.download_button("↓ Завантажити Excel", st.session_state.excel, "Pack_report.xlsx",
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       type="primary", use_container_width=True)
+
+stats = tables["statistics_report"].set_index("Metric")["Value"]
+cols = st.columns(4)
+for col, label, key in zip(cols, ["Усього одиниць", "Single", "Multi", "Операторів"],
+                           ["Total Quantity", "Total Single", "Total Multi", "Total Operators"]):
+    value = stats[key]
+    col.metric(label, "—" if pd.isna(value) else f"{value:,.0f}".replace(",", " "))
+st.write("")
+
+
+def show_table(title, key, caption=None):
+    st.markdown(f"#### {title}")
+    if caption:
+        st.caption(caption)
+    # Use a display copy: original values and MultiIndex remain intact in Excel.
+    view = tables[key].copy()
+    if isinstance(view.columns, pd.MultiIndex):
+        view.columns = [" · ".join(str(part) for part in column if str(part)) for column in view.columns]
+    else:
+        view.columns = view.columns.map(str)
+    if key == "Libiao":
+        view = view.astype(str)
+    st.dataframe(view, use_container_width=True, height=min(600, max(180, 36 * (len(view) + 1))),
+                 hide_index=key in ["statistics_report", "rate_zone_report"])
+
+
+overview, operators, lines, statistics, details = st.tabs(["Огляд зміни", "Працівники", "Лінії", "Статистика", "Про звіт"])
+with overview:
+    st.markdown("#### Динаміка пакування")
+    employee = tables["employee_report"]
+    # The line report contains a duplicate summary row; use only actual lines.
+    actual_lines = tables["line_report"].drop(index="Manual single", errors="ignore")
+    hourly = pd.DataFrame({kind: [actual_lines[(hour, kind)].sum() for hour in result["hours"]]
+                           for kind in ["Single", "Multi"]},
+                          index=[f"{hour-1:02}:00–{hour%24:02}:00" for hour in result["hours"]])
+    chart_data = hourly.rename_axis("Година").reset_index().melt(
+        id_vars="Година", var_name="Тип", value_name="Кількість")
+    st.vega_lite_chart(chart_data, {
+        "height": 260,
+        "mark": {"type": "bar", "cornerRadiusTopLeft": 3, "cornerRadiusTopRight": 3},
+        "encoding": {
+            "x": {"field": "Година", "type": "ordinal", "sort": list(hourly.index),
+                  "axis": {"labelAngle": -35}},
+            "y": {"field": "Кількість", "type": "quantitative"},
+            "color": {"field": "Тип", "type": "nominal",
+                      "scale": {"domain": ["Single", "Multi"], "range": ["#087F8C", "#A6D8CF"]}},
+            "tooltip": [{"field": "Година"}, {"field": "Тип"}, {"field": "Кількість"}]
+        }
+    }, use_container_width=True)
+    st.caption("Години та обсяги взяті з готового звіту. Правила перенесення операцій о 05:55 / 17:55 збережено.")
+    show_table("Dashboard · HC, UPH та Rate", "dashboard_report", "Ті самі значення, що на аркуші Dashboard.")
+    a, b = st.columns([1, 2])
+    with a:
+        show_table("Зони Rate", "rate_zone_report", "shape — частка операторів у %, назву збережено з оригіналу.")
+    with b:
+        show_table("Погодинний HC", "hc_final", "Кількість активних працівників за напрямком роботи.")
+with operators:
+    st.caption("ByOperator · працівники з понад 100 одиницями за години звіту. Пошук і сортування доступні в таблиці.")
+    show_table("Продуктивність працівників", "employee_report")
+    with st.expander("Додатково: деталізація по станціях"):
+        show_table("Станції", "station_report_display", "Готова проміжна таблиця оригінального коду; не входить до Excel.")
+with lines:
+    show_table("Погодинний звіт по лініях", "line_report", "By Line · включно з підсумковим рядком Manual single.")
+    show_table("Поточний HC по лініях", "line_hc_report", "Остання доступна година звіту, як у вихідному алгоритмі.")
+    show_table("Відповідність Libiao", "Libiao")
+with statistics:
+    show_table("Усі показники зміни", "statistics_report", "Повна таблиця з аркуша Statistics.")
+with details:
+    st.markdown("""#### Як працює звіт
+1. Завантажте операції та довідник працівників у форматі `.xlsx`.
+2. Натисніть **Сформувати звіт**. Зміна та її продовження визначаються оригінальним алгоритмом.
+3. Перегляньте таблиці та завантажте готовий **Pack_report.xlsx**.
+
+**Збережено:** норми, коефіцієнти стажу, пошук перерви, пороги, правила HC, UPH, Rate та порядок розрахунків.
+
+Усі 8 таблиць Excel відображаються на сайті. Позначка `—` означає відсутнє значення, а не нуль. На графіку не дублюється підсумковий рядок Manual single.
+
+Файли обробляються в пам’яті поточної сесії. Після перезапуску сервера звіт потрібно сформувати знову.
+""")
+    if mode == "Демонстрація":
+        d1, d2 = st.columns(2)
+        demo_pack, demo_employees = demo_frames(night, extended)
+        d1.download_button("Приклад операцій .xlsx", as_excel(demo_pack), "Demo_Pack.xlsx")
+        d2.download_button("Приклад довідника .xlsx", as_excel(demo_employees), "Demo_Employees.xlsx")
+st.caption("PACK ANALYTICS / TEST EDITION · Розрахункове ядро відокремлене від інтерфейсу")
