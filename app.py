@@ -11,6 +11,7 @@ from packing.demo import demo_frames, as_excel
 import pandas as pd
 import streamlit as st
 
+from packing.storage import check_storage
 from packing.calculations import calculate
 from packing.inputs import read_inputs
 from packing.excel import export_excel
@@ -187,7 +188,16 @@ with st.sidebar:
     st.header("Report setup")
     st.caption("Upload the two files for one shift.")
     demo_mode = st.toggle("Use demo data", value=True)
-
+    
+    if st.button("Перевірити сховище"):
+        try:
+            check_storage()
+            st.success("Підключення працює")
+        except Exception:
+            st.error(
+                "Не вдалося підключитися. "
+                "Перевір URL, ключ і назву bucket у Secrets."
+            )   
     if demo_mode:
         night = st.toggle("Night shift", value=False)
         extended = st.toggle("Extended shift", value=False)
@@ -268,8 +278,23 @@ tables = result["tables"]
 statistics = tables["statistics_report"].set_index("Metric")["Value"]
 
 heading, export = st.columns([3, 1])
+
+hours = result["hours"]
+
+start_hour = (hours[0] - 1) % 24
+end_hour = hours[-1] % 24
+
+report_period = f"{start_hour:02d}:00–{end_hour:02d}:00"
+
 with heading:
-    st.subheader(("Night" if result["night"] else "Day") + " shift" + (" · Extended" if result["extended"] else ""))
+    shift_name = "Night shift" if result["night"] else "Day shift"
+    extension_label = " · Extended" if result["extended"] else ""
+
+    st.subheader(
+        f"{shift_name}{extension_label} · {report_period}"
+    )
+
+    # Наявний st.caption(...) залишаємо нижче
     st.caption(f"Calculated {result['calculated_on']} · {len(result['hours'])} reported hours · "
                f"Processing {st.session_state.packing_seconds:.1f}s")
 with export:
@@ -327,21 +352,57 @@ with summary:
     compact_table(tables["hc_final"])
 
 with people:
-    st.subheader("Operator performance")
-    employee = tables["employee_report"]
-    search = st.text_input("Find an operator", placeholder="Name or employee ID")
-    display = employee.copy()
-    if search:
-        mask = (display.index.astype(str).str.contains(search, case=False, regex=False)
-                | display[("Operator", "")].astype(str).str.contains(search, case=False, regex=False))
-        display = display.loc[mask]
-    totals_only = st.toggle("Shift totals only", value=True)
-    if totals_only:
-        display = display.loc[:, [c for c in display.columns if c[0] in
-                                  ["Operator", "Work level", "Work type", "Last station", "Total"]]]
-    st.caption(f"Showing {len(display)} of {len(employee)} operators. Search changes this view only; Excel contains the full report.")
-    data_grid(display, "operators_grid")
+        @st.fragment
+        def render_people():
+            st.subheader("30 найнижчих Rate")
 
+            show_hourly_rate = st.toggle(
+            "Показати погодинні дані",
+            value=False,
+            key="worst_hourly_rate"
+            )
+
+            worst_display = tables["worst_rate"]
+
+            columns = [
+                ("Operator", ""),
+                ("Work level", ""),
+                ("Work type", ""),
+                ("Last station", ""),
+                ("Total", "Rate"),
+                ("Total", "Worked hours"),
+                ("Total", "UPH"),
+                ("Total", "Quantity")
+            ]
+
+            if show_hourly_rate:
+                for hour in result["hours"]:
+                    columns.extend([
+                        (hour, "Single"),
+                        (hour, "Multi"),
+                        (hour, "Total"),
+                        (hour, "Rate")
+                    ])
+
+            data_grid(
+                worst_display.loc[:, columns],
+                "worst_rate_grid"
+            )
+            st.subheader("Operator performance")
+            employee = tables["employee_report"]
+            search = st.text_input("Find an operator", placeholder="Name or employee ID")
+            display = employee.copy()
+            if search:
+                mask = (display.index.astype(str).str.contains(search, case=False, regex=False)
+                        | display[("Operator", "")].astype(str).str.contains(search, case=False, regex=False))
+                display = display.loc[mask]
+            totals_only = st.toggle("Shift totals only", value=True)
+            if totals_only:
+                display = display.loc[:, [c for c in display.columns if c[0] in
+                                        ["Operator", "Work level", "Work type", "Last station","First scan","Last scan", "Total"]]]
+            st.caption(f"Showing {len(display)} of {len(employee)} operators. Search changes this view only; Excel contains the full report.")
+            data_grid(display, "operators_grid")
+        render_people()
 with lines:
     st.subheader("Output by line")
     line_data = actual_lines[("Total", "Quantity")].rename("Units").rename_axis("Line").reset_index()
