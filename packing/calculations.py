@@ -652,7 +652,7 @@ def calculate(data, data_employee):
         if hour in available_hours
     ]
 
-
+    
 
 
     # ==========================================================
@@ -737,6 +737,19 @@ def calculate(data, data_employee):
         employee_operations = (
             employee_operation_groups.get_group(employee_id)
         )
+        #Облчислення першог оі останнього сканування
+        first_scan=employee_operations.min().strftime("%H:%M")
+        last_scan=employee_operations.max().strftime("%H:%M")
+        
+        employee_hourly.loc[
+            employee_id,
+            ("First scan","")
+        ]=first_scan
+
+        employee_hourly.loc[
+            employee_id,
+            ("Last scan","")
+        ]=last_scan
 
         break_distribution, break_slot, break_gap_minutes = find_break(
             employee_operations,
@@ -1283,6 +1296,13 @@ def calculate(data, data_employee):
         employee_pack_type["Work level"] == "Week 3"
     ).sum()
 
+    #========================================================
+    total_worked_hours=employee_hourly.loc[
+        employee_pack_type.index,
+        ("Total","Worked hours")
+    ].sum()
+
+    print(total_worked_hours)
     #=======================BREAKTIME========================
 
 
@@ -1372,6 +1392,15 @@ def calculate(data, data_employee):
             employee_hourly[("Total", "UPH")]
         )
     )
+    #========================================================
+    
+    packages_counting = data["Package No."].nunique()
+
+    unit_per_order=round(stats_total_quantity/packages_counting,2)
+    print('Total',stats_total_quantity)
+    print("Packages",packages_counting)
+    print("Unit per order", unit_per_order)
+    
     # ==========================================================
     # RATE ПРАЦІВНИКІВ З УРАХУВАННЯМ ФАКТИЧНОГО ТИПУ РОБОТИ
     # ==========================================================
@@ -2171,7 +2200,10 @@ def calculate(data, data_employee):
             "Pack Machine Operators",
             "Manual Single Operators",
             "Multi Operators",
-            "AVG Breaktime"
+            "AVG Breaktime",
+            "Packages",
+            "Unit per order",
+            "Total direct hours"
         ],
 
         "Value": [
@@ -2188,7 +2220,10 @@ def calculate(data, data_employee):
             count_pm_operators,
             count_manual_single_operator,
             count_multi_operators,
-            avg_breaktime
+            avg_breaktime,
+            packages_counting,
+            unit_per_order,
+            total_worked_hours
         ]
     })
 
@@ -2197,7 +2232,9 @@ def calculate(data, data_employee):
         ("Operator", ""),
         ("Work level", ""),
         ("Work type", ""),
-        ("Last station", "")
+        ("Last station", ""),
+        ("First scan",""),
+        ("Last scan","")
     ]
 
     # Погодинні показники в порядку зміни
@@ -2226,6 +2263,22 @@ def calculate(data, data_employee):
         employee_pack_type.index,
         employee_columns_order
     ].copy()
+    employee_report=employee_report.sort_values(by=("Last station",""))
+    
+    # ======================================================================
+    worst_rate=employee_report.loc[
+        employee_report[("Total","Rate")]
+    .notna()
+    ].copy()
+
+    worst_rate = worst_rate.sort_values(
+    by=("Total", "Rate"),
+    ascending=True
+)
+    worst_rate=worst_rate.head(30)
+
+
+
 
     # ======================================================================
 
@@ -2240,6 +2293,7 @@ def calculate(data, data_employee):
             "rate_zone_report": rate_zone_report,
             "hc_final": hc_final,
             "station_report_display": station_report_display,
+            "worst_rate": worst_rate,
         },
         "hours": hours_list,
         "night": bool(is_night_shift),
