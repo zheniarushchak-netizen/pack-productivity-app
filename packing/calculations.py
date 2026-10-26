@@ -890,24 +890,16 @@ def calculate(data, data_employee):
     for hour in hours_list:
 
         if (hour, "Single") not in station_hourly.columns:
-
-            station_hourly[
-                (hour, "Single")
-            ] = 0
-
+            station_hourly[(hour, "Single")] = 0
 
         if (hour, "Multi") not in station_hourly.columns:
+            station_hourly[(hour, "Multi")] = 0
 
-            station_hourly[
-                (hour, "Multi")
-            ] = 0
-
-        # Загальна кількість юнітів за кожну годину
-        for hour in hours_list:
-            station_hourly[(hour, "Total")] = (
-                station_hourly[(hour, "Single")]
-                + station_hourly[(hour, "Multi")]
-            )
+        # Calculate total units for the current hour
+        station_hourly[(hour, "Total")] = (
+            station_hourly[(hour, "Single")]
+            + station_hourly[(hour, "Multi")]
+        )
     for hour in hours_list:
 
         station_hourly[
@@ -2151,7 +2143,11 @@ def calculate(data, data_employee):
         .groupby(["Work level","Line"])
         .size()
         .unstack("Line",fill_value=0)
-        .reindex(index=work_levels, fill_value=0)
+                .reindex(
+            index=work_levels,
+            columns=sorted(data["Line"].dropna().unique()),
+            fill_value=0
+        )
     )
     line_hc_report.loc["Total"]=line_hc_report.sum(axis=0)
 
