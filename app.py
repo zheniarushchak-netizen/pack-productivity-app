@@ -15,6 +15,14 @@ from packing.storage import check_storage
 from packing.calculations import calculate
 from packing.inputs import read_inputs
 from packing.excel import export_excel
+from packing.inputs import read_inputs, read_employees
+
+from packing.storage import (
+    check_storage,
+    save_employees,
+    load_employees
+)
+
 
 st.set_page_config(page_title="Packing | Shift report", page_icon="◈", layout="wide")
 
@@ -185,26 +193,65 @@ st.markdown('<div class="brand"><div class="brand-icon">◈</div><div><h1>Packin
             '<p>Shift results · Team productivity · Line output</p></div></div>', unsafe_allow_html=True)
 
 with st.sidebar:
+
     st.header("Report setup")
+
     st.caption("Upload the two files for one shift.")
+
     demo_mode = st.toggle("Use demo data", value=True)
     
     if st.button("Перевірити сховище"):
         try:
             check_storage()
-            st.success("Підключення працює")
-        except Exception:
+            st.success("Connection is ready")
+        except Exception as exc:
             st.error(
-                "Не вдалося підключитися. "
-                "Перевір URL, ключ і назву bucket у Secrets."
-            )   
-    if demo_mode:
-        night = st.toggle("Night shift", value=False)
-        extended = st.toggle("Extended shift", value=False)
+                f"Не вдалося підключитися. "
+                f"Тип помилки: {type(exc).__name__}"
+            )
+    with st.expander("Оновити довідник працівників"):
 
+        new_employee_file = st.file_uploader(
+            "Новий довідник",
+            type=["xlsx"],
+            key="employee_directory_update"
+        )
+
+        if st.button(
+            "Зберегти довідник",
+            disabled=new_employee_file is None,
+            key="save_employee_directory"
+        ):
+            stage = "Читання завантаженого файлу"
+
+            try:
+                employee_content = new_employee_file.getvalue()
+
+                stage = "Перевірка Excel"
+                checked_employees = read_employees(employee_content)
+
+                stage = "Запис у сховище"
+                save_employees(employee_content)
+
+                st.success(
+                    f"Довідник збережено. "
+                    f"Рядків: {len(checked_employees)}"
+                )
+
+            except Exception as exc:
+                st.error(
+                    f"Етап: {stage}. "
+                    f"Тип помилки: {type(exc).__name__}"
+                )
+                
+
+                if isinstance(exc, ValueError):
+                    st.write(str(exc))
+    if demo_mode:
+        # Generate demo files
         demo_pack, demo_employees = demo_frames(
-            night=night,
-            extended=extended
+            night=False,
+            extended=False
         )
 
         pack_file = BytesIO(as_excel(demo_pack))
@@ -213,18 +260,30 @@ with st.sidebar:
         employee_file = BytesIO(as_excel(demo_employees))
         employee_file.name = "Demo_employees.xlsx"
 
-        st.info("Demo data · Fictional operators")
-
     else:
+        # Upload real operations
         pack_file = st.file_uploader(
             "Packing operations",
             type=["xlsx"]
         )
 
-        employee_file = st.file_uploader(
-            "Employee directory",
-            type=["xlsx"]
-        )
+        # Load the saved employee directory
+        employee_file = None
+
+        try:
+            saved_employee_bytes = load_employees()
+
+            employee_file = BytesIO(saved_employee_bytes)
+            employee_file.name = "Saved_employee_directory.xlsx"
+
+            st.caption("Using the saved employee directory.")
+
+        except Exception as exc:
+            st.warning(
+                "Employee directory unavailable. "
+                "Upload it using 'Update employee directory'. "
+                f"Error type: {type(exc).__name__}"
+            )
     run = st.button("Generate report", type="primary", use_container_width=True,
                     disabled=pack_file is None or employee_file is None)
     st.divider()
