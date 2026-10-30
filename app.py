@@ -16,11 +16,14 @@ from packing.calculations import calculate
 from packing.inputs import read_inputs
 from packing.excel import export_excel
 from packing.inputs import read_inputs, read_employees
+from packing.uploads import merge_operations
 
 from packing.storage import (
     check_storage,
     save_employees,
-    load_employees
+    load_employees,
+    save_operations,
+    load_operations
 )
 
 
@@ -306,26 +309,73 @@ pack_bytes, employee_bytes = pack_file.getvalue(), employee_file.getvalue()
 fingerprint = hashlib.sha256(pack_bytes + employee_bytes + str(dt.date.today()).encode()).hexdigest()
 
 if run:
-    st.session_state.pop("packing_result", None)
-    st.session_state.pop("packing_excel", None)
     started = time.perf_counter()
     stage = st.empty()
+
     try:
         with st.spinner("Preparing your report…"):
-            stage.info("Step 1 of 2 · Reading Excel files")
-            pack, employees = read_inputs(pack_bytes, employee_bytes)
-            stage.info("Step 2 of 2 · Calculating shift results")
-            result = calculate(pack, employees)
+            stage.info("Reading Excel files")
+            uploaded_operations, employees = read_inputs(
+                pack_bytes,
+                employee_bytes
+            )
+
+            if demo_mode:
+                operations = uploaded_operations
+            else:
+                saved_operations = st.session_state.get(
+                    "saved_operations"
+                )
+                loaded_until = st.session_state.get(
+                    "loaded_until"
+                )
+
+                operations, added_operations, updated_loaded_until = (
+                    merge_operations(
+                        saved_operations=saved_operations,
+                        uploaded_operations=uploaded_operations,
+                        loaded_until=loaded_until
+                    )
+                )
+
+            stage.info("Calculating shift results")
+            result = calculate(operations, employees)
+
+            # Update saved data only after successful calculation
+            if not demo_mode:
+                st.session_state.saved_operations = operations
+                st.session_state.loaded_until = updated_loaded_until
+
+                history = st.session_state.get("upload_history", [])
+
+                st.session_state.upload_history = history + [{
+                    "File": pack_file.name,
+                    "Added rows": len(added_operations),
+                    "Last loaded scan": updated_loaded_until
+                }]
+
             st.session_state.packing_result = result
             st.session_state.packing_fingerprint = fingerprint
-            st.session_state.packing_seconds = time.perf_counter() - started
-            st.session_state.packing_names = (pack_file.name, employee_file.name)
+            st.session_state.packing_seconds = (
+                time.perf_counter() - started
+            )
+            st.session_state.packing_names = (
+                pack_file.name,
+                employee_file.name
+            )
+
+            # Remove the export belonging to the previous report
+            st.session_state.pop("packing_excel", None)
+
         stage.empty()
+
     except Exception as exc:
         stage.empty()
-        st.error("Report generation failed. Check the uploaded files and required columns.")
+        st.error("Report generation failed.")
+
         with st.expander("Error details"):
             st.code(f"{type(exc).__name__}: {exc}")
+
         st.stop()
 
 if st.session_state.get("packing_fingerprint") != fingerprint or "packing_result" not in st.session_state:
@@ -333,6 +383,23 @@ if st.session_state.get("packing_fingerprint") != fingerprint or "packing_result
     st.stop()
 
 result = st.session_state.packing_result
+if not demo_mode:
+    loaded_until = st.session_state.get("loaded_until")
+
+    if loaded_until is not None:
+        st.caption(
+            f"Last loaded scan: {loaded_until:%Y-%m-%d %H:%M:%S}"
+        )
+
+    with st.expander("Upload history", expanded=False):
+        history = st.session_state.get("upload_history", [])
+
+        if history:
+            st.dataframe(
+                pd.DataFrame(history),
+                use_container_width=True,
+                hide_index=True
+            )
 tables = result["tables"]
 statistics = tables["statistics_report"].set_index("Metric")["Value"]
 
