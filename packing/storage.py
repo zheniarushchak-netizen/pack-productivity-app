@@ -45,3 +45,26 @@ def load_employees():
     )
 
     return employee_bytes
+
+
+def save_operations(operations_bytes):
+    bucket = get_bucket()
+
+    bucket.upload(
+        path="operations/current.parquet",
+        file=operations_bytes,
+        file_options={
+            "content-type": "application/octet-stream",
+            "upsert": "true"
+        }
+    )
+
+
+def load_operations():
+    bucket = get_bucket()
+
+    operations_bytes = bucket.download(
+        "operations/current.parquet"
+    )
+
+    return operations_bytes
