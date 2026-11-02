@@ -260,7 +260,7 @@ def cal_rate(
         "Week 2": 0.70,
         "Week 3": 0.85,
         "Veteran": 1.00,
-        "Unknown": 1.00
+        "Unknown": 0.65
     }
 
     level_rate = work_levels[work_level]
@@ -395,7 +395,13 @@ def cal_rate(
     hourly_rates
 )
 
-def calculate(data, data_employee):
+def calculate(data, data_employee, report_work_hours):
+    report_work_hours = float(report_work_hours)
+
+    if not 0 < report_work_hours < float("inf"):
+        raise ValueError(
+            "Report working hours must be a positive finite number."
+        )
     data = data.copy(deep=True)
     data_employee = data_employee.copy(deep=True)
     def get_status(create_time):
@@ -498,23 +504,39 @@ def calculate(data, data_employee):
     # ======================================================================
     # Створюємо номер години та лінію, зберігаючи наявні правила для Pack Machine.
 
-    data["Hour"] = (
-        data["Operation time"]
-        .dt.hour
-        + 1
+    # Exact hour boundaries belong to the previous hour.
+    hour_times = (
+        data["Operation time"] - pd.Timedelta(nanoseconds=1)
     )
 
-    data.loc[
-        (data["Operation time"].dt.hour == 5)
-        & (data["Operation time"].dt.minute >= 55),
-        "Hour"
-    ] = 7
+    data["Hour"] = hour_times.dt.hour + 1
 
-    data.loc[
-        (data["Operation time"].dt.hour == 17)
-        & (data["Operation time"].dt.minute >= 55),
-        "Hour"
-    ] = 19
+    scan_times = data["Operation time"]
+
+    day_start_mask = (
+        (
+            (scan_times.dt.hour == 5)
+            & (scan_times.dt.minute >= 55)
+        )
+        | (
+            (scan_times.dt.hour == 6)
+            & (scan_times == scan_times.dt.floor("h"))
+        )
+    )
+
+    night_start_mask = (
+        (
+            (scan_times.dt.hour == 17)
+            & (scan_times.dt.minute >= 55)
+        )
+        | (
+            (scan_times.dt.hour == 18)
+            & (scan_times == scan_times.dt.floor("h"))
+        )
+    )
+
+    data.loc[day_start_mask, "Hour"] = 7
+    data.loc[night_start_mask, "Hour"] = 19
 
     data["Line"] = (
         data["Packing station"]
@@ -539,6 +561,13 @@ def calculate(data, data_employee):
         .str.contains("PLE"),
         "Line"
     ] = "Line 0"
+
+    data.loc[ 
+        data["Packing station"]
+        .astype(str)
+        .str.contains("PACK"),
+        "Line"
+    ] = "PB300012"
 
 
 
@@ -1161,11 +1190,7 @@ def calculate(data, data_employee):
         .reset_index()
     )
 
-    min_quantity = 100
-
-    station_report_display = station_report[
-        station_report[("Total", "Quantity")] > min_quantity
-    ]
+    station_report_display = station_report.copy()
 
     station_report_display = (
         station_report_display
@@ -1244,8 +1269,18 @@ def calculate(data, data_employee):
 
     # До показників працівників включаємо лише тих,
     # хто зробив понад 100 юнітів за зміну
+    hourly_work_columns = [
+        (hour, "Worked hours") for hour in hours_list
+    ]
+
+    active_employee_mask = (
+        employee_hourly[hourly_work_columns]
+        .gt(0)
+        .any(axis=1)
+    )
+
     employee_pack_type = employee_hourly.loc[
-        employee_hourly[("Total", "Quantity")] > 100,
+        active_employee_mask,
         [
             ("Total", "Single"),
             ("Total", "Multi")
@@ -1403,7 +1438,7 @@ def calculate(data, data_employee):
         "Week 2": 0.70,
         "Week 3": 0.85,
         "Veteran": 1.00,
-        "Unknown": 1.00
+        "Unknown": 0.65
     }
 
     # Обсяг фактично виконаної роботи з урахуванням норм
@@ -1633,70 +1668,123 @@ def calculate(data, data_employee):
 
     hc_per_hour_groupby["Contribution"]= hc_per_hour_groupby["Quantity of scanned"]/hc_per_hour_groupby["Base norm"]
 
-    hc_per_hour_groupby2=(
-        hc_per_hour_groupby
-        .groupby(["Employee ID","Hour"])
-        ["Quantity of scanned"]
-        .sum()
+        # Use the same employee-hour values as Total worked hours.
+    worked_parts = []
+
+    for hour in hours_list:
+        worked_parts.append(
+            pd.DataFrame({
+                "Employee ID": employee_pack_type.index,
+                "Hour": hour,
+                "Worked hours": employee_hourly.loc[
+                    employee_pack_type.index,
+                    (hour, "Worked hours")
+                ].to_numpy()
+            })
+        )
+
+    worked_by_hour = pd.concat(worked_parts, ignore_index=True)
+
+    worked_by_hour = worked_by_hour.loc[
+        worked_by_hour["Worked hours"] > 0
+    ].copy()
+
+    # Assign each worked hour to its main process.
+    hc_candidates = hc_per_hour_groupby.merge(
+        worked_by_hour,
+        on=["Employee ID", "Hour"],
+        how="inner",
+        validate="many_to_one"
     )
-    hc_per_hour_groupby2=hc_per_hour_groupby2[hc_per_hour_groupby2>15]
 
-    hc_per_hour_groupby=hc_per_hour_groupby.set_index(["Employee ID","Hour"])
-
-    hc_valid_hours = hc_per_hour_groupby.index.isin(hc_per_hour_groupby2.index)
-
-    hc_best_type_index = (hc_per_hour_groupby.loc[
-        hc_valid_hours
-    ])
-
-    hc_best_type_index = hc_best_type_index.reset_index()
-
-    hc_best_type=(
-        hc_best_type_index
-        .groupby(["Employee ID","Hour"])
-        ["Contribution"]
+    winner_indices = (
+        hc_candidates
+        .groupby(["Employee ID", "Hour"])["Contribution"]
         .idxmax()
     )
-    
 
-    hc_winner=hc_best_type_index.loc[hc_best_type]
+    hc_winner = hc_candidates.loc[winner_indices].copy()
 
-    hc_final=(
-        hc_winner
-        .groupby(["Hour","Hourly Work type"])
-        .size()
-        .unstack("Hour")
+    # Every worked hour must have exactly one process.
+    if len(hc_winner) != len(worked_by_hour):
+        raise ValueError(
+            "Some worked hours could not be assigned to a process."
+        )
 
+    hc_winner["HC level"] = (
+        hc_winner["Employee ID"]
+        .map(employee_work_level)
+        .fillna("Unknown")
+        .replace({
+            "Unknown": "Week 1",
+            "Day1": "Week 1"
+        })
     )
 
-    hc_final.loc["Total"]=hc_final.sum(axis=0)
-    hc_final=hc_final.reindex(columns=hours_list)
+    hc_winner["HC type"] = (
+        hc_winner["Hourly Work type"]
+        .replace({"Manual Single": "Single"})
+    )
 
+    if not hc_winner["HC level"].isin(work_levels).all():
+        raise ValueError("Unexpected experience level in HC calculation.")
 
-    # 1. Кількість працівників
-    week_operator_count = (
-        dashboard_source
-        .groupby(["Work level", "Work type"])
+    if not hc_winner["HC type"].isin(work_types).all():
+        raise ValueError("Unexpected process in HC calculation.")
+
+    # Hourly HC: active people, not hours.
+    hc_final = (
+        hc_winner
+        .groupby(["Hourly Work type", "Hour"])
         .size()
-        .unstack("Work type", fill_value=0)
+        .unstack("Hour", fill_value=0)
+        .reindex(
+            index=["Manual Single", "Multi", "PM"],
+            columns=hours_list,
+            fill_value=0
+        )
+        .fillna(0)
+    )
+
+    hc_final.loc["Total"] = hc_final.sum(axis=0)
+
+    # Hours by experience and process.
+    hours_by_group = (
+        hc_winner
+        .groupby(["HC level", "HC type"])["Worked hours"]
+        .sum()
+        .unstack("HC type", fill_value=0)
         .reindex(
             index=work_levels,
             columns=work_types,
             fill_value=0
         )
+        .fillna(0.0)
     )
 
-    # Unknown враховуємо тільки в HC Veteran → Multi
-    unknown_hc = (
-        employee_pack_type["Work level"] == "Unknown"
-    ).sum()
+    # Preserve names expected by the existing dashboard.
+    hours_by_group.index.name = "Work level"
+    hours_by_group.columns.name = "Work type"
 
-    week_operator_count.loc["Veteran","Multi"]+= unknown_hc
+    grouped_hours = float(hours_by_group.to_numpy().sum())
+
+    if abs(grouped_hours - float(total_worked_hours)) > 0.000001:
+        raise ValueError(
+            "Worked-hours mismatch: "
+            f"grouped={grouped_hours:.6f}, "
+            f"total={total_worked_hours:.6f}."
+        )
+
+    # Equivalent HC uses hours, not the average hourly headcount.
+    week_operator_count = hours_by_group / report_work_hours
 
     week_operator_count["Total"] = week_operator_count.sum(axis=1)
     week_operator_count.loc["Total"] = week_operator_count.sum(axis=0)
 
-
+    dashboard_source["UPH"] = pd.to_numeric(
+        dashboard_source["UPH"],
+        errors="raise"
+    ).astype("float64")
     # 2. Середній особистий UPH
     week_avg_uph = (
         dashboard_source
@@ -2088,7 +2176,17 @@ def calculate(data, data_employee):
     # HC ПО ЛІНІЯХ — ОСТАННЯ ДОСТУПНА ГОДИНА
     # ======================================================================
 
-    last_available_hour = hours_list[-1]
+    active_hours = set(hc_winner["Hour"])
+
+    last_available_hour = next(
+        (
+            hour
+            for hour in reversed(hours_list)
+            if hour in active_hours
+        ),
+        None
+    )
+
 
     # Беремо активних працівників останньої години
     # прямо з уже готового погодинного HC
@@ -2156,6 +2254,7 @@ def calculate(data, data_employee):
         "PB300003": 2,
         "PB300004": 3,
         "PB300005": 4,
+        "PB300006": 5,
         "PB300007": 6,
         "PB300008": 7,
         "PB300009": 8,
@@ -2274,13 +2373,159 @@ def calculate(data, data_employee):
     worst_rate=worst_rate.head(30)
 
 
-
+    employee_report_display = employee_report.loc[
+        employee_report[("Total", "Quantity")] > 100
+    ].copy()
 
     # ======================================================================
+    # Packing speed: trailing 10 minutes, expressed as units/hour.
+    speed_source = data[
+        ["Operation time", "Quantity of scanned", "Pack Type", "Line"]
+    ].copy()
 
+    speed_source["Operation time"] = pd.to_datetime(
+        speed_source["Operation time"],
+        errors="raise"
+    )
+
+    speed_source["Quantity of scanned"] = pd.to_numeric(
+        speed_source["Quantity of scanned"],
+        errors="raise"
+    )
+
+    speed_source = speed_source.dropna(subset=["Operation time"])
+
+    if speed_source.empty:
+        packing_speed = pd.DataFrame(
+            columns=["Time", "Units per hour"]
+        )
+    else:
+        # Each minute is labelled by its end:
+        # 06:50 represents operations from 06:49 up to 06:50.
+        minute_units = (
+            speed_source
+            .set_index("Operation time")["Quantity of scanned"]
+            .sort_index()
+            .resample("1min", closed="right", label="right")
+            .sum()
+        )
+
+
+    
+        # Exclude the first potentially incomplete minute
+        # and the last minute unless its end has been reached.
+        first_full_end = (
+            speed_source["Operation time"].min().ceil("min")
+            + pd.Timedelta(minutes=1)
+        )
+
+        last_full_end = (
+            speed_source["Operation time"].max().floor("min")
+        )
+
+        minute_units = minute_units.loc[
+            (minute_units.index >= first_full_end)
+            & (minute_units.index <= last_full_end)
+        ]
+
+        packing_speed = (
+            minute_units
+            .rolling(window=10, min_periods=10)
+            .sum()
+            .mul(6)
+            .dropna()
+            .rename("Units per hour")
+            .rename_axis("Time")
+            .reset_index()
+        )
+        # Separate speed series for processes and packing lines.
+    speed_source["Line"] = (
+        speed_source["Line"]
+        .astype("string")
+        .fillna("Unknown line")
+        .str.strip()
+        .str.upper()
+        .replace("", "UNKNOWN LINE")
+    )
+
+    pack_types = (
+        speed_source["Pack Type"]
+        .astype("string")
+        .str.strip()
+        .str.upper()
+    )
+
+    speed_source["Process"] = "Unknown"
+
+    speed_source.loc[
+        pack_types.eq("MULTI").fillna(False),
+        "Process"
+    ] = "Multi"
+
+    speed_source.loc[
+        (
+            pack_types.eq("SINGLE")
+            & speed_source["Line"].eq("PM")
+        ).fillna(False),
+        "Process"
+    ] = "PM"
+
+    speed_source.loc[
+        (
+            pack_types.eq("SINGLE")
+            & speed_source["Line"].ne("PM")
+        ).fillna(False),
+        "Process"
+    ] = "Manual Single"
+
+    def calculate_group_speed(group_column):
+        columns = ["Time", group_column, "Units per hour"]
+
+        if speed_source.empty:
+            return pd.DataFrame(columns=columns)
+
+        # The same minute grid as the overall speed chart.
+        common_minutes = minute_units.index
+
+        if len(common_minutes) < 10:
+            return pd.DataFrame(columns=columns)
+
+        parts = []
+
+        for group_name, group in speed_source.groupby(group_column):
+            group_minutes = (
+                group
+                .set_index("Operation time")["Quantity of scanned"]
+                .sort_index()
+                .resample("1min", closed="right", label="right")
+                .sum()
+                .reindex(common_minutes, fill_value=0)
+            )
+
+            group_speed = (
+                group_minutes
+                .rolling(window=10, min_periods=10)
+                .sum()
+                .mul(6)
+                .dropna()
+                .rename("Units per hour")
+                .rename_axis("Time")
+                .reset_index()
+            )
+
+            group_speed[group_column] = group_name
+            parts.append(group_speed[columns])
+
+        if not parts:
+            return pd.DataFrame(columns=columns)
+
+        return pd.concat(parts, ignore_index=True)
+
+    packing_speed_by_process = calculate_group_speed("Process")
+    packing_speed_by_line = calculate_group_speed("Line")
     return {
         "tables": {
-            "employee_report": employee_report,
+            "employee_report": employee_report_display,
             "line_report": line_report,
             "Libiao": Libiao,
             "line_hc_report": line_hc_report,
@@ -2290,6 +2535,9 @@ def calculate(data, data_employee):
             "hc_final": hc_final,
             "station_report_display": station_report_display,
             "worst_rate": worst_rate,
+            "packing_speed": packing_speed,
+            "packing_speed_by_process": packing_speed_by_process,
+            "packing_speed_by_line": packing_speed_by_line,
         },
         "hours": hours_list,
         "night": bool(is_night_shift),
