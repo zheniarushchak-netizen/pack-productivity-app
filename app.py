@@ -982,7 +982,14 @@ with people:
             return str(value)
         view["First scan"] = source(("First scan", "")).map(scan_text)
         view["Last scan"] = source(("Last scan", "")).map(scan_text)
-        view["Break time"] = pd.to_numeric(source(("Total", "Break gap")), errors="coerce")
+        # Canonical field returned by calculate(); 0 means no gap detected.
+        break_column = ("Total", "Break gap min")
+        if break_column in employee.columns:
+            break_minutes = pd.to_numeric(employee[break_column], errors="coerce")
+            view["Break time"] = break_minutes.where(break_minutes.gt(0))
+        else:
+            break_column = None
+            view["Break time"] = float("nan")
         for label, field in [("Units", "Quantity"), ("Hours", "Worked hours"), ("UPH", "UPH"), ("Rate", "Rate")]:
             view[label] = pd.to_numeric(source(("Total", field)), errors="coerce")
         def last_line(station):
@@ -1004,26 +1011,44 @@ with people:
         st.markdown("""
         <style>
         .st-key-operator_filters {
-            background:#e8f1eb; border:1px solid #bfd4c6;
-            border-top:4px solid #176b50; border-radius:16px; padding:18px;
+            background:#ffffff; border:1px solid #d5e1d9;
+            border-radius:14px; padding:12px 16px;
+            box-shadow:0 2px 8px rgba(21,61,48,.04);
         }
         .st-key-operator_shift_table {
             border:2px solid #9ebcaf; border-top:4px solid #176b50;
             border-radius:14px; padding:6px; background:#ffffff;
             box-shadow:0 3px 12px rgba(21,61,48,.07);
         }
-        .operator-count {background:#fff; border:1px solid #d6e1d9;
-            border-radius:13px; padding:14px 18px; border-top:4px solid var(--accent);}
-        .operator-count span {font-size:14px;color:#42594e;}
-        .operator-count strong {display:block;font-size:30px;color:#153d30;margin-top:5px;}
+        .st-key-operator_view_switch button {
+            min-height:54px; border-radius:12px; font-weight:750;
+        }
+        .st-key-operator_view_switch button p {font-size:18px;font-weight:750;}
+        .st-key-operator_filters [data-testid="stVerticalBlock"] {gap:0.45rem;}
         </style>
         """, unsafe_allow_html=True)
+        if "op_display" not in st.session_state:
+            st.session_state["op_display"] = "Shift totals"
+        def change_operator_view(value):
+            st.session_state["op_display"] = value
+        with st.container(key="operator_view_switch"):
+            totals_button, hourly_button = st.columns(2)
+            for col, label in [(totals_button, "Shift totals"), (hourly_button, "Hourly")]:
+                with col:
+                    st.button(label, key=f"op_switch_{label}", use_container_width=True,
+                              type="primary" if st.session_state["op_display"] == label else "secondary",
+                              on_click=change_operator_view, args=(label,))
+        display = st.session_state["op_display"]
         with st.container(key="operator_filters"):
-            title_col, reset_col = st.columns([5, 1])
-            title_col.markdown("#### Filters")
+            search_col, mode_col, reset_col = st.columns([3, 1.3, 0.8])
+            with search_col:
+                search = st.text_input("Search operators", placeholder="Search name or login…",
+                                       key="op_search", label_visibility="collapsed")
+            with mode_col:
+                mode = st.selectbox("Operator list", ["All operators", "Lowest 30"],
+                                    key="op_mode", label_visibility="collapsed")
             with reset_col:
-                st.button("Reset filters", on_click=reset_operator_filters)
-            search = st.text_input("Find an operator", placeholder="Name or employee ID", key="op_search")
+                st.button("Reset", on_click=reset_operator_filters, use_container_width=True)
             line_col, process_col, experience_col, zone_col = st.columns(4)
             with line_col:
                 line = st.selectbox("Last line", ["All"] + sorted(view["Last line"].unique()), key="op_line")
@@ -1033,7 +1058,6 @@ with people:
                 experience = st.selectbox("Experience", ["All"] + sorted(view["Experience"].astype(str).unique()), key="op_experience")
             with zone_col:
                 zone = st.selectbox("Rate zone", ["All", "≥95%", "80–<95%", "60–<80%", "<60%", "Missing"], key="op_zone")
-            st.caption("Last line is based on the last recorded station. Process and Rate filters use shift totals.")
         filtered = view.copy()
         if search.strip():
             term = search.strip()
@@ -1046,26 +1070,13 @@ with people:
         if line != "All":
             filtered = filtered.loc[filtered["Last line"].eq(line)]
         rate = filtered["Rate"]
-        counts = [len(filtered), rate.ge(95).sum(), (rate.ge(80) & rate.lt(95)).sum(),
-                  (rate.ge(60) & rate.lt(80)).sum(), rate.lt(60).sum()]
-        for col, label, value, accent in zip(st.columns(5),
-                ["Operators", "≥95%", "80–<95%", "60–<80%", "<60%"], counts,
-                ["#176b50", "#21864a", "#c89b2d", "#e18a42", "#d7655d"]):
-            with col:
-                st.markdown(f'<div class="operator-count" style="--accent:{accent}"><span>{label}</span><strong>{int(value)}</strong></div>', unsafe_allow_html=True)
-        st.caption(f"Counts follow search, last line, process and experience filters. Missing Rate: {int(rate.isna().sum())}. Rate-zone and Lowest 30 filters apply below.")
         masks = {"≥95%": rate.ge(95), "80–<95%": rate.ge(80) & rate.lt(95), "60–<80%": rate.ge(60) & rate.lt(80), "<60%": rate.lt(60), "Missing": rate.isna()}
         if zone != "All":
             filtered = filtered.loc[masks[zone]]
-        mode_col, display_col = st.columns(2)
-        with mode_col:
-            mode = st.radio("Operators", ["All operators", "Lowest 30"], horizontal=True, key="op_mode")
-        with display_col:
-            display = st.radio("Display", ["Shift totals", "Hourly"], horizontal=True, key="op_display")
         filtered = filtered.sort_values("Rate", na_position="last", kind="stable")
         if mode == "Lowest 30":
             filtered = filtered.loc[filtered["Rate"].notna()].head(30)
-        st.caption(f"Showing {len(filtered)} of {len(view)} operators. Lowest 30 uses the current filters and excludes missing Rate.")
+        st.caption(f"{len(filtered)} of {len(view)} operators · Sorted by shift Rate · Filters use shift totals and last recorded line.")
         if filtered.empty:
             st.info("No operators match these filters.")
             return
@@ -1086,13 +1097,56 @@ with people:
         def operator_dialog(operator_id, selected_hour=None):
             row = employee.loc[operator_id]
             info = view.loc[operator_id]
-            st.subheader(str(info["Operator"]))
-            st.caption(f"ID: {operator_id} · {info['Experience']} · Last station: {info['Last station']}")
-            for col, label in zip(st.columns(3), ["First scan", "Last scan", "Break time"]):
-                with col:
-                    value = info[label]
-                    st.metric("Break gap (min)" if label == "Break time" else label,
-                              number(value, 1) if label == "Break time" else str(value))
+            st.markdown("""
+            <style>
+            .op-detail-title {font-size:23px;font-weight:750;color:#153d30;overflow-wrap:anywhere;}
+            .op-detail-grid {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:16px 0;}
+            .op-detail-card {background:#f0f5f1;border:1px solid #cfdfd3;border-radius:12px;padding:13px;min-width:0;}
+            .op-detail-card span {font-size:12px;color:#526b5e;display:block;}
+            .op-detail-card strong {font-size:23px;line-height:1.4;color:#123e30;display:block;overflow-wrap:anywhere;}
+            .op-detail-card.hero {background:#176b50;}
+            .op-detail-card.hero span,.op-detail-card.hero strong {color:white;}
+            @media(max-width:640px) {
+                .op-detail-grid {grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}
+                .op-detail-card {padding:10px;}
+                .op-detail-card strong {font-size:20px;}
+                .op-detail-title {font-size:20px;}
+                div[role="dialog"] {max-width:calc(100vw - 16px)!important;max-height:92dvh;overflow-y:auto;}
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            st.markdown(f'<div class="op-detail-title">{html.escape(str(info["Operator"]))}</div>',
+                        unsafe_allow_html=True)
+            st.caption(f"Employee ID: {operator_id} · Shift summary")
+            def detail_cards(items):
+                cards = []
+                for label, value, hero in items:
+                    cards.append(f'<div class="op-detail-card{" hero" if hero else ""}">'
+                                 f'<span>{html.escape(label)}</span><strong>{html.escape(str(value))}</strong></div>')
+                st.markdown('<div class="op-detail-grid">' + "".join(cards) + '</div>',
+                            unsafe_allow_html=True)
+            detail_cards([
+                ("Shift Rate", number(info["Rate"], 2, "%"), True),
+                ("Shift UPH", number(info["UPH"], 1), True),
+                ("Experience", info["Experience"], False),
+                ("Last station", info["Last station"], False),
+                ("First scan", info["First scan"], False),
+                ("Last scan", info["Last scan"], False),
+                ("Worked hours", number(info["Hours"], 2), False),
+                ("Break gap · min", number(info["Break time"], 1) if pd.notna(info["Break time"]) else "Not detected", False),
+            ])
+            if pd.isna(info["Break time"]):
+                st.info(
+                    "No qualifying break gap was detected for this operator (30–90 minutes overlapping a break slot)."
+                    if break_column is not None else
+                    "The employee report does not contain Total / Break gap min."
+                )
+                with st.expander("Break data diagnostics"):
+                    st.write("Source column:", str(break_column) if break_column is not None else "No unambiguous duration column found")
+                    st.write("Available break fields:",
+                             [str(c) for c in employee.columns if "break" in str(c).lower()])
+            else:
+                st.caption("Break gap is the full scan-to-scan gap selected by find_break (30–90 minutes overlapping a break slot), not the scheduled 45-minute deduction.")
             choices = [None] + list(result["hours"])
             chosen = st.selectbox("Period", choices,
                 index=choices.index(selected_hour) if selected_hour in choices else 0,
@@ -1101,11 +1155,13 @@ with people:
             group = "Total" if chosen is None else chosen
             fields = [("Single", "Single"), ("Multi", "Multi"),
                       ("Units", "Quantity" if chosen is None else "Total"), ("Rate", "Rate")]
-            for col, (label, field) in zip(st.columns(4), fields):
-                with col:
-                    value = pd.to_numeric(row.get((group, field), float("nan")), errors="coerce")
-                    st.metric(label, number(value, 2 if label == "Rate" else 0, "%" if label == "Rate" else ""))
-            st.caption("Single includes PM when combined in the source report. Break gap is the scan gap recorded by the calculation, not proof of a personal break.")
+            period_cards = []
+            for label, field in fields:
+                value = pd.to_numeric(row.get((group, field), float("nan")), errors="coerce")
+                period_cards.append((label, number(value, 2 if label == "Rate" else 0,
+                                                   "%" if label == "Rate" else ""), False))
+            detail_cards(period_cards)
+            st.caption("Selected-period values come directly from the report. Single includes PM when they are combined in the report.")
             records = []
             for h in result["hours"]:
                 for kind in ["Single", "Multi"]:
@@ -1115,22 +1171,39 @@ with people:
                 x=alt.X("Hour:O", sort=list(dict.fromkeys(r["Hour"] for r in records))),
                 y=alt.Y("Units:Q"), color=alt.Color("Type:N",
                     scale=alt.Scale(domain=["Single", "Multi"], range=["#e49a79", "#208463"])),
-                tooltip=["Hour", "Type", "Units"]).properties(height=280)
+                tooltip=[alt.Tooltip("Hour:O"), alt.Tooltip("Type:N"),
+                         alt.Tooltip("Units:Q", format=",.0f")]).properties(height=280)
             st.altair_chart(chart, use_container_width=True)
+            with st.expander("Hourly values"):
+                detail_rows = []
+                for h in result["hours"]:
+                    item = {"Hour": f"{(int(h)-1)%24:02d}:00–{int(h)%24:02d}:00"}
+                    for label, field in [("Single", "Single"), ("Multi", "Multi"), ("Units", "Total"), ("Rate", "Rate"), ("UPH", "UPH")]:
+                        if (h, field) in employee.columns:
+                            item[label] = pd.to_numeric(row[(h, field)], errors="coerce")
+                    detail_rows.append(item)
+                st.dataframe(pd.DataFrame(detail_rows), hide_index=True, use_container_width=True)
+            with st.expander("All report fields"):
+                full = pd.DataFrame({
+                    "Field": [" · ".join(map(str, c)) if isinstance(c, tuple) else str(c) for c in row.index],
+                    "Value": ["—" if pd.isna(v) else str(v) for v in row.values],
+                })
+                st.dataframe(full, hide_index=True, use_container_width=True)
 
-        st.caption("Click a name or Rate cell to open details. In Hourly, clicking an hour opens its Single / Multi breakdown.")
+        st.caption("Select Open profile → or a name to view scan times, break and detailed results. Select an hourly cell for its Single / Multi breakdown.")
         table_token = hashlib.sha256(
             repr((list(filtered.index), display, st.session_state.get("packing_fingerprint"))).encode()
         ).hexdigest()[:12]
         if display == "Shift totals":
             shift_view = filtered[[
-                "Operator", "Experience", "Last station", "First scan",
-                "Last scan", "Break time", "Units", "Hours", "UPH", "Rate"
+                "Operator", "Experience", "Last station", "Units", "Hours", "UPH", "Rate"
             ]].copy()
+            shift_view["Profile"] = "Open profile →"
             styled = (shift_view.style
                       .set_properties(subset=["Units", "Hours", "UPH", "Rate"],
                                       **{"color": "#123e30", "font-weight": "bold"})
-                      .map(colour_rate, subset=["Rate"]))
+                      .map(colour_rate, subset=["Rate"])
+                      .set_properties(subset=["Profile"], **{"color": "#176b50", "font-weight": "bold"}))
             with st.container(key="operator_shift_table"):
                 st.dataframe(
                     styled, use_container_width=True, hide_index=True,
@@ -1140,7 +1213,7 @@ with people:
                     column_config={
                         "Operator": st.column_config.TextColumn(width="medium", pinned=True),
                         "Last station": st.column_config.TextColumn(help="Last recorded station in the uploaded data."),
-                        "Break time": st.column_config.NumberColumn("Break (min)", format="%.1f", help="Recorded Break gap from the report, in minutes; not the scheduled slot."),
+                        "Profile": st.column_config.TextColumn("Details", width="small", help="Click to open the operator profile."),
                         "Rate": st.column_config.NumberColumn(format="%.2f%%"),
                         "UPH": st.column_config.NumberColumn(format="%.1f"),
                         "Hours": st.column_config.NumberColumn(format="%.2f"),
@@ -1156,7 +1229,7 @@ with people:
                 st.info("No hourly metrics are available in this report.")
             else:
                 metric = st.radio("Hourly metric", available, horizontal=True, key="op_hourly_metric")
-                hourly = filtered[["Operator", "Experience", "Last station", "First scan", "Last scan", "Break time"]].copy()
+                hourly = filtered[["Operator", "Experience", "Last station"]].copy()
                 hour_columns = []
                 hour_lookup = {}
                 for hour in result["hours"]:
@@ -1172,7 +1245,6 @@ with people:
                     style = style.map(colour_rate, subset=hour_columns)
                 fmt = "%.2f%%" if metric == "Rate" else "%.1f" if metric == "UPH" else "%.0f"
                 config = {label: st.column_config.NumberColumn(format=fmt) for label in hour_columns}
-                config["Break time"] = st.column_config.NumberColumn("Break (min)", format="%.1f")
                 config["Operator"] = st.column_config.TextColumn(width="medium", pinned=True)
                 st.caption("Hours label the full interval. Missing values are shown as —; actual zeros remain zero. Ranking and filters still use shift totals.")
                 hourly_key = f"op_hourly_{table_token}_{metric}"
@@ -1187,35 +1259,119 @@ with people:
     render_people()
 
 with lines:
-    st.subheader("Output by line")
-    show_speed_comparison(
-        table=tables.get("packing_speed_by_line"),
-        group_column="Line",
-        title="Packing speed by line",
-        widget_key="packing_speed_line_filter",
-    )
-    line_data = actual_lines[("Total", "Quantity")].rename("Units").rename_axis("Line").reset_index()
-    line_data = line_data.sort_values("Units", ascending=False)
-    plot(line_data, "Line", "Units", order=line_data["Line"].tolist(), horizontal=True,
-         height=max(180, min(600, len(line_data)*28)))
-    st.caption("The chart excludes the Manual single summary row to avoid counting it twice.")
-    st.markdown("**Full line report**")
-    data_grid(tables["line_report"], "lines_grid")
-    st.subheader("Current headcount by line")
-    st.caption("Last available hour in the report.")
-    # Розташовуємо номери Libiao під відповідними лініями.
-    hc_table = tables["line_hc_report"].copy()
-
-    libiao_row = tables["Libiao"].reindex(
-        columns=hc_table.columns
-    )
-
-    combined_table = pd.concat([
-        libiao_row,
-        hc_table
-    ])
-
-    compact_table(combined_table)
+    @st.fragment
+    def render_lines_workspace():
+        report = tables["line_report"].drop(index="Manual single", errors="ignore").copy()
+        if report.empty:
+            st.info("No line data available.")
+            return
+        report.index = report.index.map(str)
+        shift_hours = list(result["hours"])
+        label = lambda h: f"{(int(h)-1)%24:02d}:00"
+        def value(line, hour, field):
+            return pd.to_numeric(report.loc[line,(hour,field)],errors="coerce") if (hour,field) in report.columns else float("nan")
+        totals = pd.DataFrame(index=report.index)
+        for name, field in [("Units","Quantity"),("Rate","Rate"),("Single","Single"),("Multi","Multi")]:
+            totals[name] = [value(line,"Total",field) for line in report.index]
+        totals["Output/h"] = totals["Units"] / max(1,len(shift_hours))
+        hourly_hc = tables.get("hc_final",pd.DataFrame())
+        last_hc = tables.get("line_hc_report",pd.DataFrame())
+        totals["HC"] = float("nan")
+        for line in totals.index:
+            if line in hourly_hc.index:
+                sequence = pd.to_numeric(hourly_hc.loc[line],errors="coerce").dropna()
+                if not sequence.empty:
+                    totals.loc[line,"HC"] = sequence.iloc[-1]
+            elif line in last_hc.columns and "Total" in last_hc.index:
+                totals.loc[line,"HC"] = pd.to_numeric(last_hc.loc["Total",line],errors="coerce")
+        st.markdown('''<style>
+        .lccards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px;margin:12px 0 22px}
+        .lccard{background:white;border:1px solid #d6e5da;border-radius:13px;padding:13px;min-width:0}
+        .lccard small{color:#60796b;display:block;font-size:12px}.lccard b{font-size:clamp(17px,2vw,27px);color:#176b50}
+        @media(max-width:950px){.lccards{grid-template-columns:repeat(3,minmax(0,1fr))}}
+        @media(max-width:650px){.lccards{grid-template-columns:repeat(2,minmax(0,1fr))}.lccard{padding:9px}}
+        </style>''',unsafe_allow_html=True)
+        def cards(items):
+            st.markdown('<div class="lccards">'+''.join('<div class="lccard"><small>'+html.escape(k)+'</small><b>'+html.escape(number(v,d,s))+'</b></div>' for k,v,d,s in items)+'</div>',unsafe_allow_html=True)
+        st.subheader("Line Control Center")
+        st.caption("All lines at a glance · Select one to see hourly output and packing dynamics")
+        cards([("Total output",totals["Units"].sum(),0,""),
+               ("Avg total output/h",totals["Output/h"].sum(),0,""),
+               ("Active lines",totals["Units"].gt(0).sum(),0,""),
+               ("Lines below 95%",totals["Rate"].lt(95).sum(),0,""),
+               ("Headcount (last hour)",pd.to_numeric(hourly_hc[shift_hours[-1]],errors="coerce").sum() if shift_hours[-1] in hourly_hc.columns else float("nan"),0,"")])
+        left,right=st.columns([1,2.2],gap="medium")
+        with left:
+            st.markdown("#### Lines overview")
+            search=st.text_input("Search line",placeholder="PB300009…",key="lcc_search")
+            order=st.selectbox("Sort by",["Most units","Lowest Rate","Lowest units","Name"],key="lcc_sort")
+            view=totals.loc[totals.index.str.contains(search.strip(),case=False,regex=False)].copy()
+            if order=="Most units": view=view.sort_values("Units",ascending=False)
+            elif order=="Lowest Rate": view=view.sort_values("Rate",na_position="last")
+            elif order=="Lowest units": view=view.sort_values("Units")
+            else: view=view.sort_index()
+            if view.empty:
+                st.info("No matching lines.")
+                return
+            if st.session_state.get("lcc_line") not in view.index: st.session_state["lcc_line"]=view.index[0]
+            chosen=st.selectbox("Selected line",list(view.index),key="lcc_line")
+            table_view=view[["Units","Output/h","HC","Rate"]]
+            table_view.index.name="Line"
+            st.dataframe(table_view.style.format({"Units":"{:,.0f}","Output/h":"{:,.0f}","HC":"{:.0f}","Rate":"{:.1f}%"},na_rep="—"),width="stretch",height=min(600,38*(len(view)+1)+10))
+            st.caption("Output/h = units divided by reported hours; Rate is unchanged from source.")
+        with right:
+            st.markdown("### "+html.escape(chosen))
+            cards([("Output",totals.loc[chosen,"Units"],0,""),
+                   ("Avg output/h",totals.loc[chosen,"Output/h"],0,""),
+                   ("Headcount",totals.loc[chosen,"HC"],0,""),
+                   ("Rate",totals.loc[chosen,"Rate"],1,"%"),
+                   ("Multi units",totals.loc[chosen,"Multi"],0,"")])
+            hours_data=pd.DataFrame([{"Hour":label(h),"Single":value(chosen,h,"Single"),
+                 "Multi":value(chosen,h,"Multi"),"Units":value(chosen,h,"Total"),
+                 "Rate":value(chosen,h,"Rate"),"Key":h} for h in shift_hours])
+            hour=st.selectbox("Inspect period",[None]+shift_hours,key="lcc_hour",
+                 format_func=lambda h:"Whole shift" if h is None else label(h)+f"–{int(h)%24:02d}:00")
+            a,b=st.columns(2,gap="small")
+            with a:
+                st.markdown("**Hourly output**")
+                long=hours_data[["Hour","Single","Multi"]].melt(id_vars="Hour",var_name="Type",value_name="Units")
+                chart=alt.Chart(long).mark_bar().encode(x=alt.X("Hour:O",sort=hours_data.Hour.tolist(),axis=alt.Axis(labelAngle=0)),y=alt.Y("Units:Q"),color=alt.Color("Type:N",scale=alt.Scale(domain=["Single","Multi"],range=["#e49a79","#176b50"])),tooltip=["Hour:N","Type:N",alt.Tooltip("Units:Q",format=",.0f")]).properties(height=260)
+                st.altair_chart(chart,width="stretch")
+            with b:
+                st.markdown("**Packing dynamics · rolling 10 min × 6**")
+                speed=tables.get("packing_speed_by_line")
+                if speed is None or speed.empty:
+                    st.info("No speed data.")
+                else:
+                    points=speed.loc[speed["Line"].astype(str).str.upper().str.strip().eq(chosen.upper())].copy()
+                    points["Time"]=pd.to_datetime(points["Time"],errors="coerce")
+                    points["Units per hour"]=pd.to_numeric(points["Units per hour"],errors="coerce")
+                    points=points.dropna(subset=["Time","Units per hour"]).sort_values("Time")
+                    if hour is not None:
+                        points=points.loc[(points["Time"]-pd.Timedelta(nanoseconds=1)).dt.hour.eq((int(hour)-1)%24)]
+                    if points.empty: st.info("No speed data for this period.")
+                    else:
+                        graph=alt.Chart(points).mark_area(color="#6aaf8d",opacity=.3,line={"color":"#176b50","strokeWidth":2}).encode(x=alt.X("Time:T",axis=alt.Axis(format="%H:%M",labelAngle=0)),y=alt.Y("Units per hour:Q",scale=alt.Scale(zero=True)),tooltip=[alt.Tooltip("Time:T",format="%H:%M"),alt.Tooltip("Units per hour:Q",format=",.0f")]).properties(height=260)
+                        st.altair_chart(graph,width="stretch")
+            st.markdown("**Hourly details**")
+            display=hours_data if hour is None else hours_data.loc[hours_data.Key.eq(hour)]
+            st.dataframe(display.drop(columns="Key").style.format({"Single":"{:,.0f}","Multi":"{:,.0f}","Units":"{:,.0f}","Rate":"{:.2f}%"},na_rep="—"),hide_index=True,width="stretch",height=min(410,37*(len(display)+1)+10))
+            st.caption("Rate, hourly output and 10-minute speed are taken directly from existing calculations.")
+        st.divider()
+        st.subheader("Headcount by line · hourly")
+        st.caption("Full hourly staffing table from the original report; no hours are hidden.")
+        if not hourly_hc.empty:
+            hc_display=hourly_hc.copy()
+            hc_display.columns=[label(h) if isinstance(h,(int,float)) else str(h) for h in hc_display.columns]
+            hc_display.index.name="Line / Process"
+            st.dataframe(hc_display,width="stretch",height=min(620,38*(len(hc_display)+1)+10))
+        else: st.info("No hourly headcount report available.")
+        if not last_hc.empty:
+            with st.expander("Headcount by experience · last available hour"):
+                st.dataframe(last_hc.T,width="stretch")
+        with st.expander("Full line report"):
+            data_grid(report,"lcc_full_report")
+    render_lines_workspace()
 
 with statistics_tab:
     st.subheader("Shift statistics")
