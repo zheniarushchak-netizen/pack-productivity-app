@@ -688,7 +688,7 @@ with export:
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            use_container_width=True, type="primary")
 
-summary, people, lines, statistics_tab = st.tabs(["Overview", "Operators", "Lines", "Reports"])
+summary, people, lines, singles_tab, statistics_tab = st.tabs(["Overview", "Operators", "Lines", "Singles", "Reports"])
 with summary:
     dashboard = tables["dashboard_report"]
     rate_view = dashboard.xs("AVG Rate", level="Metric")
@@ -698,20 +698,38 @@ with summary:
         return frame.loc["Total", column] if "Total" in frame.index and column in frame.columns else float("nan")
     overview_left, overview_right = st.columns([1.15, 1])
     with overview_left:
-        overall = pd.to_numeric(dashboard_total(rate_view, "Total"), errors="coerce")
+        expected_summary = result.get("expected_uph")
+        overall = pd.to_numeric(
+            expected_summary["Achievement (%)"] if expected_summary is not None
+            else dashboard_total(rate_view, "Total"), errors="coerce"
+        )
         fill = 0 if pd.isna(overall) else min(100, max(0, float(overall)))
-        st.markdown(
-            '<div class="summary-hero"><div><div class="kpi-label">Overall performance</div>'
-            f'<div class="large-ring" style="background:conic-gradient(#178451 {fill}%,#e6ebe1 0)">'
-            f'<div>{number(overall, 1, "%")}</div></div></div><div class="hero-output">'
-            '<div class="kpi-label">Shift output</div>'
-            f'<div class="kpi-value">{number(statistics.get("Total Quantity", float("nan")))}</div>'
-            '<div class="ring-note">units packed</div><hr>'
-            f'<div>Equivalent HC <b>{number(dashboard_total(hc_view, "Total"), 2)}</b></div>'
+        main_uph_rows = (
+            f'<div>Actual UPH <b>{number(expected_summary["Actual UPH"], 1)}</b></div>'
+            f'<div>Expected UPH <b>{number(expected_summary["Expected UPH"], 1)}</b></div>'
+            if expected_summary is not None else
             f'<div>Average UPH <b>{number(dashboard_total(uph_view, "Total"), 1)}</b></div>'
-            f'<div>Shift <b>{html.escape(report_period)}</b></div></div></div>',
+        )
+        main_label = "Expected Achievement" if expected_summary is not None else "Overall performance"
+        st.markdown(
+            '<div class="summary-hero"><div><div class="kpi-label">'
+            + main_label
+            + '</div>'
+            + f'<div class="large-ring" style="background:conic-gradient(#178451 {fill}%,#e6ebe1 0)">'
+            + f'<div>{number(overall, 1, "%")}</div></div></div><div class="hero-output">'
+            + '<div class="kpi-label">Shift output</div>'
+            + f'<div class="kpi-value">{number(statistics.get("Total Quantity", float("nan")))}</div>'
+            + '<div class="ring-note">units packed</div><hr>'
+            + f'<div>Equivalent HC <b>{number(dashboard_total(hc_view, "Total"), 2)}</b></div>'
+            + main_uph_rows
+            + f'<div>Shift <b>{html.escape(report_period)}</b></div></div></div>',
             unsafe_allow_html=True,
         )
+        if expected_summary is not None:
+            st.caption(
+                f'Average Operator UPH: {number(dashboard_total(uph_view, "Total"), 1)}'
+                f' · Average Operator Rate: {number(dashboard_total(rate_view, "Total"), 1, "%")}'
+            )
     with overview_right:
         st.markdown("#### Experience composition")
         experience = hc_view.drop(index="Total", errors="ignore")["Total"]
@@ -732,6 +750,50 @@ with summary:
         else:
             st.info("Experience composition is unavailable for this report.")
         st.caption("Share of equivalent headcount, based on the report's experience groups.")
+    # Expected UPH (available when packing/calculations.py includes the new metrics).
+    expected = result.get("expected_uph")
+    expected_hourly = tables.get("expected_uph_hourly")
+    if expected is not None and expected_hourly is not None:
+        st.subheader("Expected Productivity")
+        a, b, c = st.columns(3)
+        with a:
+            st.metric("Actual UPH", number(expected.get("Actual UPH", float("nan")), 1))
+        with b:
+            st.metric("Expected UPH", number(expected.get("Expected UPH", float("nan")), 1))
+        with c:
+            st.metric("Expected Achievement", number(expected.get("Achievement (%)", float("nan")), 1, "%"))
+        st.caption(
+            f'Expected output: {number(expected.get("Expected output", float("nan")))} units'
+            f' | Output gap: {number(expected.get("Output gap", float("nan")))} units'
+        )
+        if abs(expected.get("Excluded units", 0)) > 0.01:
+            st.info(
+                f'{expected["Excluded units"]:,.0f} units are outside the active employee-hour '
+                'dataset used for Expected UPH; full shift output still includes them.'
+            )
+        values = expected_hourly[["Hour label", "Actual UPH", "Expected UPH"]].melt(
+            id_vars="Hour label", var_name="Metric", value_name="UPH"
+        )
+        expected_chart = (
+            alt.Chart(values).mark_line(point=True, strokeWidth=3).encode(
+                x=alt.X("Hour label:N", title="Hour",
+                        sort=expected_hourly["Hour label"].tolist(),
+                        axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("UPH:Q", title="Units per worked hour",
+                        scale=alt.Scale(zero=False)),
+                color=alt.Color("Metric:N", scale=alt.Scale(
+                    domain=["Actual UPH", "Expected UPH"],
+                    range=["#176b50", "#F59E0B"]
+                ), legend=alt.Legend(orient="top", title=None)),
+                tooltip=["Hour label:N", "Metric:N", alt.Tooltip("UPH:Q", format=",.1f")],
+            ).properties(height=350)
+        )
+        st.altair_chart(expected_chart, use_container_width=True)
+        with st.expander("Hourly Expected UPH details"):
+            fields = ["Hour label", "HC", "Actual UPH", "Expected UPH", "Achievement (%)", "Output gap"]
+            st.dataframe(expected_hourly[[c for c in fields if c in expected_hourly.columns]],
+                         hide_index=True, use_container_width=True)
+
     actual_lines = tables["line_report"].drop(index="Manual single", errors="ignore")
     hours = result["hours"]
     labels = [f"{h-1:02}:00–{h%24:02}:00" for h in hours]
@@ -1261,117 +1323,568 @@ with people:
 with lines:
     @st.fragment
     def render_lines_workspace():
+        """Line overview followed by an operator/hour drill-down for one line."""
         report = tables["line_report"].drop(index="Manual single", errors="ignore").copy()
         if report.empty:
             st.info("No line data available.")
             return
+
         report.index = report.index.map(str)
         shift_hours = list(result["hours"])
-        label = lambda h: f"{(int(h)-1)%24:02d}:00"
-        def value(line, hour, field):
-            return pd.to_numeric(report.loc[line,(hour,field)],errors="coerce") if (hour,field) in report.columns else float("nan")
-        totals = pd.DataFrame(index=report.index)
-        for name, field in [("Units","Quantity"),("Rate","Rate"),("Single","Single"),("Multi","Multi")]:
-            totals[name] = [value(line,"Total",field) for line in report.index]
-        totals["Output/h"] = totals["Units"] / max(1,len(shift_hours))
-        hourly_hc = tables.get("hc_final",pd.DataFrame())
-        last_hc = tables.get("line_hc_report",pd.DataFrame())
-        totals["HC"] = float("nan")
-        for line in totals.index:
-            if line in hourly_hc.index:
-                sequence = pd.to_numeric(hourly_hc.loc[line],errors="coerce").dropna()
-                if not sequence.empty:
-                    totals.loc[line,"HC"] = sequence.iloc[-1]
-            elif line in last_hc.columns and "Total" in last_hc.index:
-                totals.loc[line,"HC"] = pd.to_numeric(last_hc.loc["Total",line],errors="coerce")
-        st.markdown('''<style>
-        .lccards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px;margin:12px 0 22px}
-        .lccard{background:white;border:1px solid #d6e5da;border-radius:13px;padding:13px;min-width:0}
-        .lccard small{color:#60796b;display:block;font-size:12px}.lccard b{font-size:clamp(17px,2vw,27px);color:#176b50}
-        @media(max-width:950px){.lccards{grid-template-columns:repeat(3,minmax(0,1fr))}}
-        @media(max-width:650px){.lccards{grid-template-columns:repeat(2,minmax(0,1fr))}.lccard{padding:9px}}
-        </style>''',unsafe_allow_html=True)
-        def cards(items):
-            st.markdown('<div class="lccards">'+''.join('<div class="lccard"><small>'+html.escape(k)+'</small><b>'+html.escape(number(v,d,s))+'</b></div>' for k,v,d,s in items)+'</div>',unsafe_allow_html=True)
-        st.subheader("Line Control Center")
-        st.caption("All lines at a glance · Select one to see hourly output and packing dynamics")
-        cards([("Total output",totals["Units"].sum(),0,""),
-               ("Avg total output/h",totals["Output/h"].sum(),0,""),
-               ("Active lines",totals["Units"].gt(0).sum(),0,""),
-               ("Lines below 95%",totals["Rate"].lt(95).sum(),0,""),
-               ("Headcount (last hour)",pd.to_numeric(hourly_hc[shift_hours[-1]],errors="coerce").sum() if shift_hours[-1] in hourly_hc.columns else float("nan"),0,"")])
-        left,right=st.columns([1,2.2],gap="medium")
-        with left:
-            st.markdown("#### Lines overview")
-            search=st.text_input("Search line",placeholder="PB300009…",key="lcc_search")
-            order=st.selectbox("Sort by",["Most units","Lowest Rate","Lowest units","Name"],key="lcc_sort")
-            view=totals.loc[totals.index.str.contains(search.strip(),case=False,regex=False)].copy()
-            if order=="Most units": view=view.sort_values("Units",ascending=False)
-            elif order=="Lowest Rate": view=view.sort_values("Rate",na_position="last")
-            elif order=="Lowest units": view=view.sort_values("Units")
-            else: view=view.sort_index()
-            if view.empty:
-                st.info("No matching lines.")
-                return
-            if st.session_state.get("lcc_line") not in view.index: st.session_state["lcc_line"]=view.index[0]
-            chosen=st.selectbox("Selected line",list(view.index),key="lcc_line")
-            table_view=view[["Units","Output/h","HC","Rate"]]
-            table_view.index.name="Line"
-            st.dataframe(table_view.style.format({"Units":"{:,.0f}","Output/h":"{:,.0f}","HC":"{:.0f}","Rate":"{:.1f}%"},na_rep="—"),width="stretch",height=min(600,38*(len(view)+1)+10))
-            st.caption("Output/h = units divided by reported hours; Rate is unchanged from source.")
-        with right:
-            st.markdown("### "+html.escape(chosen))
-            cards([("Output",totals.loc[chosen,"Units"],0,""),
-                   ("Avg output/h",totals.loc[chosen,"Output/h"],0,""),
-                   ("Headcount",totals.loc[chosen,"HC"],0,""),
-                   ("Rate",totals.loc[chosen,"Rate"],1,"%"),
-                   ("Multi units",totals.loc[chosen,"Multi"],0,"")])
-            hours_data=pd.DataFrame([{"Hour":label(h),"Single":value(chosen,h,"Single"),
-                 "Multi":value(chosen,h,"Multi"),"Units":value(chosen,h,"Total"),
-                 "Rate":value(chosen,h,"Rate"),"Key":h} for h in shift_hours])
-            hour=st.selectbox("Inspect period",[None]+shift_hours,key="lcc_hour",
-                 format_func=lambda h:"Whole shift" if h is None else label(h)+f"–{int(h)%24:02d}:00")
-            a,b=st.columns(2,gap="small")
-            with a:
-                st.markdown("**Hourly output**")
-                long=hours_data[["Hour","Single","Multi"]].melt(id_vars="Hour",var_name="Type",value_name="Units")
-                chart=alt.Chart(long).mark_bar().encode(x=alt.X("Hour:O",sort=hours_data.Hour.tolist(),axis=alt.Axis(labelAngle=0)),y=alt.Y("Units:Q"),color=alt.Color("Type:N",scale=alt.Scale(domain=["Single","Multi"],range=["#e49a79","#176b50"])),tooltip=["Hour:N","Type:N",alt.Tooltip("Units:Q",format=",.0f")]).properties(height=260)
-                st.altair_chart(chart,width="stretch")
-            with b:
-                st.markdown("**Packing dynamics · rolling 10 min × 6**")
-                speed=tables.get("packing_speed_by_line")
-                if speed is None or speed.empty:
-                    st.info("No speed data.")
+        hour_label = lambda h: f"{(int(h) - 1) % 24:02d}:00"
+        hour_interval = lambda h: f"{(int(h) - 1) % 24:02d}:00–{int(h) % 24:02d}:00"
+
+        def line_value(line, hour, metric):
+            key = (hour, metric)
+            if key not in report.columns:
+                return float("nan")
+            return pd.to_numeric(report.loc[line, key], errors="coerce")
+
+        # The line's last-hour HC comes from the existing line HC report.
+        # hc_final contains PROCESS headcounts, not line headcounts.
+        last_hc = tables.get("line_hc_report", pd.DataFrame())
+        station_source = tables.get("station_report_display", pd.DataFrame())
+        station_line_col = ("Line", "")
+        station_id_col = ("Employee ID", "")
+        station_name_col = ("Operator", "")
+        station_level_col = ("Work level", "")
+        station_station_col = ("Packing station", "")
+
+        if (
+            station_source is not None
+            and not station_source.empty
+            and station_line_col in station_source.columns
+            and station_id_col in station_source.columns
+        ):
+            all_stations = station_source.copy()
+            all_stations[station_line_col] = all_stations[station_line_col].astype(str)
+        else:
+            all_stations = pd.DataFrame()
+
+        rows = []
+        for line in report.index:
+            units = line_value(line, "Total", "Quantity")
+            single = line_value(line, "Total", "Single")
+            multi = line_value(line, "Total", "Multi")
+            rate = line_value(line, "Total", "Rate")
+            count = float("nan")
+            if not all_stations.empty:
+                count = all_stations.loc[
+                    all_stations[station_line_col].eq(line), station_id_col
+                ].nunique()
+            last_count = float("nan")
+            if (last_hc is not None and not last_hc.empty
+                    and "Total" in last_hc.index and line in last_hc.columns):
+                last_count = pd.to_numeric(last_hc.loc["Total", line], errors="coerce")
+            rows.append({
+                "Line": line,
+                "Units": units,
+                "Multi": multi,
+                "Single": single,
+                "Output/h": units / len(shift_hours) if shift_hours else float("nan"),
+                "Operators": count,
+                "Last HC": last_count,
+                "Rate": rate,
+            })
+        totals = pd.DataFrame(rows).set_index("Line")
+        totals.index.name = "Line"
+
+        st.markdown("""
+        <style>
+        .lc-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:12px 0 18px}
+        .lc-tile{background:#fff;border:1px solid #d7e4db;border-radius:15px;padding:17px;min-width:0}
+        .lc-tile small{display:block;color:#678070;font-size:12px;margin-bottom:7px}
+        .lc-tile strong{display:block;color:#176b50;font-size:clamp(20px,2.4vw,29px);line-height:1.2}
+        .lc-section{margin:22px 0 6px;padding-top:10px;border-top:1px solid #dce6dd}
+        @media(max-width:780px){.lc-summary{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.lc-tile{padding:12px}}
+        </style>
+        """, unsafe_allow_html=True)
+
+        def summary_cards(items):
+            st.markdown(
+                '<div class="lc-summary">' + ''.join(
+                    '<div class="lc-tile"><small>' + html.escape(label) + '</small><strong>'
+                    + html.escape(number(value, digits, suffix)) + '</strong></div>'
+                    for label, value, digits, suffix in items
+                ) + '</div>',
+                unsafe_allow_html=True,
+            )
+
+        # ==========================================================
+        # 1. COMPLETE OVERVIEW: ALL LINES
+        # ==========================================================
+        st.subheader("Lines overview")
+        st.caption("All packing lines · Full-shift totals and last recorded line headcount")
+        summary_cards([
+            ("Total output", totals["Units"].sum(), 0, ""),
+            ("Average total output/h", totals["Output/h"].sum(), 0, ""),
+            ("Active lines", totals["Units"].gt(0).sum(), 0, ""),
+            ("Lines below 95% Rate", totals["Rate"].lt(95).sum(), 0, ""),
+        ])
+
+        search_col, sort_col = st.columns([2, 1])
+        with search_col:
+            search = st.text_input(
+                "Search lines", placeholder="Search PB300004…", key="lines_overview_search"
+            )
+        with sort_col:
+            sort_by = st.selectbox(
+                "Sort lines", ["Most units", "Lowest Rate", "Lowest units", "Name"],
+                key="lines_overview_sort"
+            )
+
+        overview = totals.loc[
+            totals.index.str.contains(search.strip(), case=False, regex=False)
+        ].copy()
+        if sort_by == "Most units":
+            overview = overview.sort_values("Units", ascending=False)
+        elif sort_by == "Lowest Rate":
+            overview = overview.sort_values("Rate", na_position="last")
+        elif sort_by == "Lowest units":
+            overview = overview.sort_values("Units")
+        else:
+            overview = overview.sort_index()
+
+        if overview.empty:
+            st.info("No lines match the search. Clear the search to select a line.")
+        else:
+            formatted_overview = overview[
+                ["Units", "Multi", "Single", "Output/h", "Operators", "Last HC", "Rate"]
+            ].style.format({
+                "Units": "{:,.0f}", "Multi": "{:,.0f}", "Single": "{:,.0f}",
+                "Output/h": "{:,.0f}", "Operators": "{:.0f}",
+                "Last HC": "{:.0f}", "Rate": "{:.1f}%",
+            }, na_rep="—")
+            st.dataframe(
+                formatted_overview, width="stretch",
+                height=min(610, 39 * (len(overview) + 1) + 12),
+            )
+        st.caption(
+            "Output/h = total line units ÷ reported hours. Operators = unique people recorded "
+            "on the line during the shift. Last HC = original last-hour line HC. "
+            "Rate comes from the existing line report."
+        )
+
+        # ==========================================================
+        # 2. SELECTED LINE: SUMMARY, GRAPHS, HOURLY TABLE
+        # ==========================================================
+        st.markdown('<div class="lc-section"></div>', unsafe_allow_html=True)
+        st.subheader("Line details")
+        options = list(report.index)
+        if st.session_state.get("lines_selected") not in options:
+            st.session_state["lines_selected"] = (
+                overview.index[0] if not overview.empty else options[0]
+            )
+        line_col, hour_col = st.columns([1.4, 1])
+        with line_col:
+            chosen = st.selectbox("Packing line", options, key="lines_selected")
+        with hour_col:
+            selected_hour = st.selectbox(
+                "Inspect hour", [None] + shift_hours,
+                format_func=lambda h: "Whole shift" if h is None else hour_interval(h),
+                key="lines_hour_focus",
+            )
+
+        summary_cards([
+            ("Line output", totals.loc[chosen, "Units"], 0, ""),
+            ("Average output/h", totals.loc[chosen, "Output/h"], 0, ""),
+            ("Operators this shift", totals.loc[chosen, "Operators"], 0, ""),
+            ("Line Rate", totals.loc[chosen, "Rate"], 1, "%"),
+        ])
+
+        hours_data = pd.DataFrame([
+            {
+                "Hour": hour_label(h), "Hour key": h,
+                "Single": line_value(chosen, h, "Single"),
+                "Multi": line_value(chosen, h, "Multi"),
+                "Units": line_value(chosen, h, "Total"),
+                "Rate": line_value(chosen, h, "Rate"),
+            }
+            for h in shift_hours
+        ])
+
+        chart_left, chart_right = st.columns(2, gap="medium")
+        with chart_left:
+            st.markdown("#### Hourly output")
+            output_long = hours_data[["Hour", "Single", "Multi"]].melt(
+                id_vars="Hour", var_name="Type", value_name="Units"
+            )
+            bars = (
+                alt.Chart(output_long)
+                .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                .encode(
+                    x=alt.X("Hour:O", sort=hours_data["Hour"].tolist(),
+                            axis=alt.Axis(labelAngle=0), title=None),
+                    y=alt.Y("Units:Q", title="Units", scale=alt.Scale(zero=True)),
+                    color=alt.Color("Type:N", scale=alt.Scale(
+                        domain=["Single", "Multi"], range=["#e49a79", "#176b50"]
+                    ), legend=alt.Legend(orient="top", title=None)),
+                    tooltip=[alt.Tooltip("Hour:N"), alt.Tooltip("Type:N"),
+                             alt.Tooltip("Units:Q", format=",.0f")],
+                    opacity=alt.condition(
+                        alt.datum.Hour == hour_label(selected_hour),
+                        alt.value(1), alt.value(0.75)
+                    ) if selected_hour is not None else alt.value(1),
+                )
+                .properties(height=300, background="transparent")
+            )
+            st.altair_chart(bars, use_container_width=True)
+
+        with chart_right:
+            st.markdown("#### Packing dynamics · rolling 10 min × 6")
+            speed = tables.get("packing_speed_by_line")
+            if speed is None or speed.empty:
+                st.info("No 10-minute speed data is available.")
+            else:
+                points = speed.loc[
+                    speed["Line"].astype(str).str.upper().str.strip().eq(chosen.upper())
+                ].copy()
+                points["Time"] = pd.to_datetime(points["Time"], errors="coerce")
+                points["Units per hour"] = pd.to_numeric(
+                    points["Units per hour"], errors="coerce"
+                )
+                points = points.dropna(subset=["Time", "Units per hour"]).sort_values("Time")
+                if selected_hour is not None:
+                    points = points.loc[
+                        (points["Time"] - pd.Timedelta(nanoseconds=1)).dt.hour.eq(
+                            (int(selected_hour) - 1) % 24
+                        )
+                    ]
+                if points.empty:
+                    st.info("No speed data for this line and hour.")
                 else:
-                    points=speed.loc[speed["Line"].astype(str).str.upper().str.strip().eq(chosen.upper())].copy()
-                    points["Time"]=pd.to_datetime(points["Time"],errors="coerce")
-                    points["Units per hour"]=pd.to_numeric(points["Units per hour"],errors="coerce")
-                    points=points.dropna(subset=["Time","Units per hour"]).sort_values("Time")
-                    if hour is not None:
-                        points=points.loc[(points["Time"]-pd.Timedelta(nanoseconds=1)).dt.hour.eq((int(hour)-1)%24)]
-                    if points.empty: st.info("No speed data for this period.")
-                    else:
-                        graph=alt.Chart(points).mark_area(color="#6aaf8d",opacity=.3,line={"color":"#176b50","strokeWidth":2}).encode(x=alt.X("Time:T",axis=alt.Axis(format="%H:%M",labelAngle=0)),y=alt.Y("Units per hour:Q",scale=alt.Scale(zero=True)),tooltip=[alt.Tooltip("Time:T",format="%H:%M"),alt.Tooltip("Units per hour:Q",format=",.0f")]).properties(height=260)
-                        st.altair_chart(graph,width="stretch")
-            st.markdown("**Hourly details**")
-            display=hours_data if hour is None else hours_data.loc[hours_data.Key.eq(hour)]
-            st.dataframe(display.drop(columns="Key").style.format({"Single":"{:,.0f}","Multi":"{:,.0f}","Units":"{:,.0f}","Rate":"{:.2f}%"},na_rep="—"),hide_index=True,width="stretch",height=min(410,37*(len(display)+1)+10))
-            st.caption("Rate, hourly output and 10-minute speed are taken directly from existing calculations.")
-        st.divider()
-        st.subheader("Headcount by line · hourly")
-        st.caption("Full hourly staffing table from the original report; no hours are hidden.")
-        if not hourly_hc.empty:
-            hc_display=hourly_hc.copy()
-            hc_display.columns=[label(h) if isinstance(h,(int,float)) else str(h) for h in hc_display.columns]
-            hc_display.index.name="Line / Process"
-            st.dataframe(hc_display,width="stretch",height=min(620,38*(len(hc_display)+1)+10))
-        else: st.info("No hourly headcount report available.")
-        if not last_hc.empty:
-            with st.expander("Headcount by experience · last available hour"):
-                st.dataframe(last_hc.T,width="stretch")
-        with st.expander("Full line report"):
-            data_grid(report,"lcc_full_report")
+                    dynamics = (
+                        alt.Chart(points)
+                        .mark_area(
+                            color="#6aaf8d", opacity=0.30,
+                            line={"color": "#176b50", "strokeWidth": 2.4}
+                        )
+                        .encode(
+                            x=alt.X("Time:T", axis=alt.Axis(format="%H:%M", labelAngle=0),
+                                    title=None),
+                            y=alt.Y("Units per hour:Q", title="Units / hour",
+                                    scale=alt.Scale(zero=True)),
+                            tooltip=[alt.Tooltip("Time:T", format="%H:%M"),
+                                     alt.Tooltip("Units per hour:Q", format=",.0f")],
+                        )
+                        .properties(height=300, background="transparent")
+                    )
+                    st.altair_chart(dynamics, use_container_width=True)
+        st.caption("Select an hour above to focus the dynamics chart. The bars show whole-hour output; the area chart shows trailing 10-minute packing speed.")
+
+        st.markdown("#### Hourly line performance")
+        hourly_display = hours_data if selected_hour is None else hours_data.loc[
+            hours_data["Hour key"].eq(selected_hour)
+        ]
+        st.dataframe(
+            hourly_display.drop(columns="Hour key").style.format({
+                "Single": "{:,.0f}", "Multi": "{:,.0f}", "Units": "{:,.0f}",
+                "Rate": "{:.2f}%",
+            }, na_rep="—"),
+            hide_index=True, width="stretch",
+            height=min(380, 39 * (len(hourly_display) + 1) + 12),
+        )
+
+        # ==========================================================
+        # 3. EMPLOYEE OUTPUT ON THE SELECTED LINE (BY HOUR)
+        # ==========================================================
+        st.markdown('<div class="lc-section"></div>', unsafe_allow_html=True)
+        st.subheader("Operators on this line")
+        st.caption("Units by employee and hour on this line, including employees who worked on multiple lines.")
+        if all_stations.empty:
+            st.info("The station report is unavailable; operator drill-down cannot be displayed.")
+            return
+        line_stations = all_stations.loc[
+            all_stations[station_line_col].eq(chosen)
+        ].copy()
+        if line_stations.empty:
+            st.info("No operators were recorded on this line.")
+            return
+
+        # Station data is one row per employee/station, so sum volumes across
+        # stations for each person. Never sum station Rate or station worked hours:
+        # those may reflect the same break multiple times.
+        # Normalize only required columns to a flat table for safe aggregation.
+        flat = pd.DataFrame(index=line_stations.index)
+        flat["Employee ID"] = line_stations[station_id_col].astype("string")
+        flat["Operator"] = (
+            line_stations[station_name_col].astype(str)
+            if station_name_col in line_stations.columns else "—"
+        )
+        flat["Experience"] = (
+            line_stations[station_level_col].fillna("Unknown").astype(str)
+            if station_level_col in line_stations.columns else "Unknown"
+        )
+        flat["Station"] = (
+            line_stations[station_station_col].fillna("—").astype(str)
+            if station_station_col in line_stations.columns else "—"
+        )
+        for h in shift_hours:
+            source_col = (h, "Total")
+            flat[hour_label(h)] = (
+                pd.to_numeric(line_stations[source_col], errors="coerce").fillna(0)
+                if source_col in line_stations.columns else 0
+            )
+        label_columns = [hour_label(h) for h in shift_hours]
+        grouped = flat.groupby("Employee ID", dropna=False, sort=False)
+        employee_view = grouped[label_columns].sum().reset_index()
+        employee_view["Operator"] = grouped["Operator"].first().to_numpy()
+        employee_view["Experience"] = grouped["Experience"].first().to_numpy()
+        employee_view["Stations"] = grouped["Station"].agg(
+            lambda values: ", ".join(sorted(set(values.dropna())))
+        ).to_numpy()
+        employee_view["Total units"] = employee_view[label_columns].sum(axis=1)
+        employee_view = employee_view.sort_values("Total units", ascending=False)
+
+        operator_search_col, top_col = st.columns([2, 1])
+        with operator_search_col:
+            operator_search = st.text_input(
+                "Find operator", placeholder="Name or employee ID…",
+                key="lines_operator_search"
+            )
+        with top_col:
+            show_operators = st.selectbox(
+                "Operators", ["All operators", "Top 20", "Lowest 20"],
+                key="lines_operator_limit"
+            )
+        if operator_search.strip():
+            match = (
+                employee_view["Operator"].str.contains(operator_search, case=False, regex=False)
+                | employee_view["Employee ID"].str.contains(operator_search, case=False, regex=False)
+            )
+            employee_view = employee_view.loc[match]
+        if show_operators == "Top 20":
+            employee_view = employee_view.nlargest(20, "Total units")
+        elif show_operators == "Lowest 20":
+            employee_view = employee_view.nsmallest(20, "Total units")
+
+        if selected_hour is not None:
+            visible_hours = [hour_label(selected_hour)]
+        else:
+            visible_hours = label_columns
+        columns = ["Employee ID", "Operator", "Experience", "Stations"] + visible_hours + ["Total units"]
+        st.dataframe(
+            employee_view[columns], hide_index=True, width="stretch",
+            height=min(680, max(170, 38 * (len(employee_view) + 1) + 12)),
+            column_config={
+                "Employee ID": st.column_config.TextColumn(width="small"),
+                "Operator": st.column_config.TextColumn(width="medium", pinned=True),
+                "Stations": st.column_config.TextColumn(width="medium"),
+                **{
+                    col: st.column_config.NumberColumn(col, format="%.0f")
+                    for col in visible_hours + ["Total units"]
+                },
+            },
+        )
+        st.caption(
+            "Employee hourly columns contain scanned units, not inferred worked time or "
+            "operator Rate. Employee totals include only the selected line. "
+            "When an hour is selected, only that hour's column is displayed."
+        )
+
+        # Compare the station-level drilldown with the source line totals.
+        # This is a diagnostic, not a silent correction of either source.
+        station_units = float(employee_view["Total units"].sum()) if (
+            not operator_search.strip() and show_operators == "All operators"
+        ) else None
+        if station_units is not None and pd.notna(totals.loc[chosen, "Units"]):
+            diff = station_units - float(totals.loc[chosen, "Units"])
+            if abs(diff) > 0.01:
+                st.warning(
+                    f"Station drill-down differs from the line total by {diff:+,.0f} units. "
+                    "The source reports use different aggregation paths; no values were altered."
+                )
+
+        with st.expander("Full source line report"):
+            data_grid(report, "lines_full_source_report")
+
     render_lines_workspace()
+
+with singles_tab:
+    @st.fragment
+    def render_singles_workspace():
+        """Dedicated Single analysis from existing line and speed reports."""
+        line_source = tables["line_report"].copy()
+        report_hours = list(result["hours"])
+        if line_source.empty or not report_hours:
+            st.info("No hourly Single data is available.")
+            return
+
+        def amount(line, hour, field="Single"):
+            key = (hour, field)
+            if line not in line_source.index or key not in line_source.columns:
+                return 0.0
+            value = pd.to_numeric(line_source.loc[line, key], errors="coerce")
+            return 0.0 if pd.isna(value) else float(value)
+
+        # Manual Single is an existing dedicated row. PM is included in Single,
+        # so do not add PM twice when computing the combined Single total.
+        regular_lines = line_source.drop(index="Manual single", errors="ignore")
+        hour_records = []
+        for h in report_hours:
+            manual = amount("Manual single", h)
+            pm = amount("Pack Machine", h)
+            col = (h, "Single")
+            multi_col = (h, "Multi")
+            total_single = (float(pd.to_numeric(regular_lines[col], errors="coerce").fillna(0).sum())
+                            if col in regular_lines.columns else 0.0)
+            total_multi = (float(pd.to_numeric(regular_lines[multi_col], errors="coerce").fillna(0).sum())
+                           if multi_col in regular_lines.columns else 0.0)
+            pack_total = total_single + total_multi
+            hour_records.append({
+                "Hour key": h,
+                "Hour": f"{(int(h) - 1) % 24:02d}:00",
+                "Manual Single": manual,
+                "PM": pm,
+                "Total Single": total_single,
+                "Total Pack": pack_total,
+                "Single share (%)": total_single / pack_total * 100 if pack_total else float("nan"),
+            })
+        singles_hourly = pd.DataFrame(hour_records)
+        # PM + Manual should account for all Singles; any mismatch remains visible.
+        singles_hourly["Unclassified Single"] = (
+            singles_hourly["Total Single"] - singles_hourly["Manual Single"] - singles_hourly["PM"]
+        )
+        total_manual = float(singles_hourly["Manual Single"].sum())
+        total_pm = float(singles_hourly["PM"].sum())
+        total_single = float(singles_hourly["Total Single"].sum())
+        total_pack = float(singles_hourly["Total Pack"].sum())
+        singles_share = total_single / total_pack * 100 if total_pack else float("nan")
+        pm_share = total_pm / total_single * 100 if total_single else float("nan")
+
+        st.subheader("Singles Intelligence")
+        st.caption("Manual Single and Pack Machine · hourly output, Single share and packing dynamics")
+        a, b, c, d = st.columns(4)
+        a.metric("Total Single", f"{total_single:,.0f}")
+        b.metric("Manual Single", f"{total_manual:,.0f}")
+        c.metric("Pack Machine", f"{total_pm:,.0f}")
+        d.metric("Single share of Pack", f"{singles_share:.2f}%" if pd.notna(singles_share) else "—")
+        st.caption(f"PM accounts for {pm_share:.1f}% of Single units." if pd.notna(pm_share)
+                   else "PM share is unavailable.")
+        if singles_hourly["Unclassified Single"].abs().gt(0.01).any():
+            st.warning("Manual Single + PM differs from combined Single for some hours. "
+                       "The original line report values are shown without correction.")
+
+        st.markdown("#### Hourly Singles output")
+        chart_frame = singles_hourly[["Hour", "Manual Single", "PM"]].melt(
+            id_vars="Hour", var_name="Process", value_name="Units"
+        )
+        bars = alt.Chart(chart_frame).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+            x=alt.X("Hour:N", sort=singles_hourly["Hour"].tolist(), title=None,
+                    axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("Units:Q", title="Scanned units"),
+            color=alt.Color("Process:N", scale=alt.Scale(
+                domain=["Manual Single", "PM"], range=["#0EA5E9", "#F59E0B"]
+            ), legend=alt.Legend(orient="top", title=None)),
+            tooltip=["Hour:N", "Process:N", alt.Tooltip("Units:Q", format=",.0f")],
+        ).properties(height=320)
+        st.altair_chart(bars, use_container_width=True)
+
+        st.markdown("#### Single share by hour")
+        share_plot = alt.Chart(singles_hourly).mark_line(
+            point=alt.OverlayMarkDef(size=65), strokeWidth=3, color="#176b50"
+        ).encode(
+            x=alt.X("Hour:N", sort=singles_hourly["Hour"].tolist(), title=None,
+                    axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("Single share (%):Q", title="Single share (%)",
+                    scale=alt.Scale(zero=True)),
+            tooltip=["Hour:N", alt.Tooltip("Single share (%):Q", format=".2f")],
+        ).properties(height=250)
+        st.altair_chart(share_plot, use_container_width=True)
+
+        # Hour-to-hour deltas are in units (and percentage points for share).
+        singles_hourly["Single change"] = singles_hourly["Total Single"].diff()
+        singles_hourly["Manual change"] = singles_hourly["Manual Single"].diff()
+        singles_hourly["PM change"] = singles_hourly["PM"].diff()
+        singles_hourly["Share change (pp)"] = singles_hourly["Single share (%)"].diff()
+        observed_changes = singles_hourly.dropna(subset=["Single change"])
+        st.markdown("#### Biggest rises and drops")
+        if observed_changes.empty:
+            st.info("At least two reported hours are needed to compare changes.")
+        else:
+            rise = observed_changes.loc[observed_changes["Single change"].idxmax()]
+            fall = observed_changes.loc[observed_changes["Single change"].idxmin()]
+            rise_col, fall_col = st.columns(2)
+            rise_col.metric("Largest hourly rise", f'{rise["Single change"]:+,.0f} units',
+                            help=f'At {rise["Hour"]} compared with the preceding reported hour')
+            fall_col.metric("Largest hourly drop", f'{fall["Single change"]:+,.0f} units',
+                            help=f'At {fall["Hour"]} compared with the preceding reported hour')
+            st.caption(f'Largest rise at {rise["Hour"]}; largest drop at {fall["Hour"]}. '
+                       "Changes compare consecutive reported hours, not necessarily uninterrupted clock hours.")
+            delta_chart = alt.Chart(observed_changes).mark_bar().encode(
+                x=alt.X("Hour:N", sort=singles_hourly["Hour"].tolist(), title=None,
+                        axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("Single change:Q", title="Change in Single units vs previous hour"),
+                color=alt.condition(alt.datum["Single change"] >= 0,
+                                    alt.value("#176b50"), alt.value("#D97757")),
+                tooltip=["Hour:N", alt.Tooltip("Single change:Q", format="+,.0f")],
+            ).properties(height=220)
+            st.altair_chart(delta_chart, use_container_width=True)
+
+        st.markdown("#### 10-minute packing dynamics")
+        speed = tables.get("packing_speed_by_process")
+        if speed is None or speed.empty or not {"Process", "Time", "Units per hour"}.issubset(speed.columns):
+            st.info("Process-level 10-minute speed data is not available in this report.")
+        else:
+            speed_view = speed.copy()
+            speed_view["Time"] = pd.to_datetime(speed_view["Time"], errors="coerce")
+            speed_view["Units per hour"] = pd.to_numeric(speed_view["Units per hour"], errors="coerce")
+            speed_view = speed_view.loc[speed_view["Process"].isin(["Manual Single", "PM"])]
+            speed_view = speed_view.dropna(subset=["Time", "Units per hour"])
+            if speed_view.empty:
+                st.info("There are no Manual Single / PM speed series in the current calculation output.")
+                st.caption("Hourly process totals above remain valid; a process-level speed fix in calculations.py may be needed.")
+            else:
+                available_processes = [name for name in ["Manual Single", "PM"]
+                                       if name in speed_view["Process"].unique()]
+                chosen_processes = st.multiselect(
+                    "Show processes", available_processes, default=available_processes,
+                    key="singles_speed_processes"
+                )
+                focus_hour = st.selectbox(
+                    "Inspect hour", [None] + report_hours,
+                    format_func=lambda h: "Whole shift" if h is None else
+                        f"{(int(h)-1)%24:02d}:00–{int(h)%24:02d}:00",
+                    key="singles_speed_hour",
+                )
+                speed_view = speed_view.loc[speed_view["Process"].isin(chosen_processes)]
+                if focus_hour is not None:
+                    speed_view = speed_view.loc[
+                        (speed_view["Time"] - pd.Timedelta(nanoseconds=1)).dt.hour.eq((focus_hour-1)%24)
+                    ]
+                if speed_view.empty:
+                    st.info("No speed samples in the selected interval.")
+                else:
+                    speed_chart = alt.Chart(speed_view).mark_line(strokeWidth=2.5).encode(
+                        x=alt.X("Time:T", title=None, axis=alt.Axis(format="%H:%M", labelAngle=0)),
+                        y=alt.Y("Units per hour:Q", title="Units / hour", scale=alt.Scale(zero=True)),
+                        color=alt.Color("Process:N", scale=alt.Scale(
+                            domain=["Manual Single", "PM"], range=["#0EA5E9", "#F59E0B"]
+                        ), legend=alt.Legend(orient="top", title=None)),
+                        tooltip=["Process:N", alt.Tooltip("Time:T", format="%H:%M"),
+                                 alt.Tooltip("Units per hour:Q", format=",.0f")],
+                    ).properties(height=320)
+                    st.altair_chart(speed_chart, use_container_width=True)
+                if len(available_processes) < 2:
+                    st.caption("Only available process speed series are displayed. Missing PM or Manual Single speed data is not inferred.")
+
+        st.markdown("#### Hourly Singles details")
+        details = singles_hourly[[
+            "Hour", "Manual Single", "PM", "Total Single", "Total Pack",
+            "Single share (%)", "Manual change", "PM change", "Single change",
+            "Share change (pp)",
+        ]].copy()
+        st.dataframe(details.style.format({
+            "Manual Single": "{:,.0f}", "PM": "{:,.0f}", "Total Single": "{:,.0f}",
+            "Total Pack": "{:,.0f}", "Single share (%)": "{:.2f}%",
+            "Manual change": "{:+,.0f}", "PM change": "{:+,.0f}",
+            "Single change": "{:+,.0f}", "Share change (pp)": "{:+.2f}",
+        }, na_rep="—"), width="stretch", hide_index=True)
+        st.caption("Single share = Single units / (Single + Multi units). "
+                   "PM is a subset of Single, not an additional category. "
+                   "All hourly values come from the existing line report.")
+
+    render_singles_workspace()
 
 with statistics_tab:
     st.subheader("Shift statistics")
