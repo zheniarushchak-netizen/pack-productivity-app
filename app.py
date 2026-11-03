@@ -169,7 +169,11 @@ st.set_page_config(page_title="Packing | Shift report", page_icon="◈", layout=
 st.markdown("""
 <style>
 .stApp {background:#faf8f3;color:#182e29}
-.block-container {max-width:1760px;padding-top:1.5rem;padding-bottom:4rem}
+.block-container {
+    max-width: 1760px;
+    padding-top: 5rem !important;
+    padding-bottom: 4rem;
+}а
 [data-testid="stSidebar"] {background:#fff;border-right:1px solid #e0e8e2}
 h1,h2,h3 {color:#183c31;letter-spacing:-.035em}
 .brand {display:flex;align-items:center;gap:16px;margin-bottom:26px}
@@ -203,7 +207,29 @@ button[kind="primary"] {background:#176b50!important;border-color:#176b50!import
 .ring-center {background:white;width:100px;height:100px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:25px;font-weight:700;color:#183c31}
 .hero .ring-center {background:#183e32;color:white}
 .ring-note {font-size:12px;color:#73847b;line-height:1.8}
-@media(max-width:700px){.block-container{padding-top:1rem}.brand h1{font-size:26px}.stTabs [data-baseweb="tab-list"]{gap:8px}.kpi{padding:18px}}
+.ring-note {
+    font-size: 12px;
+    color: #73847b;
+    line-height: 1.8;
+}
+
+@media (max-width: 700px) {
+    .block-container {
+        padding-top: 4.5rem !important;
+    }
+
+    .brand h1 {
+        font-size: 26px;
+    }
+
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+
+    .kpi {
+        padding: 18px;
+    }
+}
 
 .summary-hero{display:flex;align-items:center;gap:30px;border:1px solid #dfdfd4;border-radius:20px;background:#fffdf9;padding:24px;margin-bottom:22px;flex-wrap:wrap}
 .large-ring{width:170px;height:170px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-top:14px}
