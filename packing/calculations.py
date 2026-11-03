@@ -1775,6 +1775,182 @@ def calculate(data, data_employee, report_work_hours):
             f"total={total_worked_hours:.6f}."
         )
 
+
+    # ==========================================================
+    # EXPECTED UPH — HOURLY AND OVERALL
+    # ==========================================================
+
+    expected_factors = {
+        "Day1": 0.55,
+        "Week 1": 0.65,
+        "Week 2": 0.70,
+        "Week 3": 0.85,
+        "Veteran": 1.00,
+        "Unknown": 0.65,
+    }
+
+    expected_process_norms = {
+        "Multi": 260.0,
+        "Manual Single": 120.0,
+        "PM": 315.0,
+    }
+
+    # One employee, one hour, one main process.
+    expected_source = hc_winner[
+        ["Employee ID", "Hour", "Hourly Work type", "Worked hours"]
+    ].copy()
+
+    # Use original experience, keeping Day1 separate.
+    expected_source["Experience"] = (
+        expected_source["Employee ID"]
+        .map(employee_work_level)
+        .fillna("Unknown")
+    )
+
+    expected_source["Factor"] = (
+        expected_source["Experience"].map(expected_factors)
+    )
+
+    expected_source["Base UPH"] = (
+        expected_source["Hourly Work type"]
+        .map(expected_process_norms)
+    )
+
+    if expected_source[["Factor", "Base UPH"]].isna().any().any():
+        raise ValueError("Missing Expected UPH norm or experience factor.")
+
+    # Expected output for the actual worked time.
+    expected_source["Expected units"] = (
+        expected_source["Base UPH"]
+        * expected_source["Factor"]
+        * expected_source["Worked hours"]
+    )
+
+    # Actual units from ALL processes, not only the main one.
+    actual_by_employee_hour = (
+        data.loc[data["Hour"].isin(hours_list)]
+        .groupby(["Employee ID", "Hour"])["Quantity of scanned"]
+        .sum()
+        .rename("Actual units")
+        .reset_index()
+    )
+
+    expected_source = expected_source.merge(
+        actual_by_employee_hour,
+        on=["Employee ID", "Hour"],
+        how="left",
+        validate="one_to_one",
+    )
+
+    expected_source["Actual units"] = (
+        expected_source["Actual units"].fillna(0)
+    )
+
+    # Aggregate by hour using worked hours.
+    expected_uph_hourly = (
+        expected_source
+        .groupby("Hour")
+        .agg(
+            **{
+                "HC": ("Employee ID", "nunique"),
+                "Worked hours": ("Worked hours", "sum"),
+                "Actual units": ("Actual units", "sum"),
+                "Expected units": ("Expected units", "sum"),
+            }
+        )
+        .reindex(hours_list)
+        .reset_index()
+    )
+
+    expected_uph_hourly["Expected UPH"] = (
+        expected_uph_hourly["Expected units"]
+        / expected_uph_hourly["Worked hours"].replace(0, float("nan"))
+    )
+
+    expected_uph_hourly["Actual UPH"] = (
+        expected_uph_hourly["Actual units"]
+        / expected_uph_hourly["Worked hours"].replace(0, float("nan"))
+    )
+
+    expected_uph_hourly["Achievement (%)"] = (
+        expected_uph_hourly["Actual units"]
+        / expected_uph_hourly["Expected units"].replace(0, float("nan"))
+        * 100
+    )
+
+    expected_uph_hourly["Output gap"] = (
+        expected_uph_hourly["Actual units"]
+        - expected_uph_hourly["Expected units"]
+    )
+
+    # Overall shift: weighted by actual worked hours.
+    total_expected_units = float(expected_source["Expected units"].sum())
+    total_actual_units = float(expected_source["Actual units"].sum())
+    total_expected_hours = float(expected_source["Worked hours"].sum())
+
+    expected_uph_summary = {
+        "Actual UPH": (
+            total_actual_units / total_expected_hours
+            if total_expected_hours > 0 else float("nan")
+        ),
+        "Expected UPH": (
+            total_expected_units / total_expected_hours
+            if total_expected_hours > 0 else float("nan")
+        ),
+        "Achievement (%)": (
+            total_actual_units / total_expected_units * 100
+            if total_expected_units > 0 else float("nan")
+        ),
+        "Expected output": total_expected_units,
+        "Actual output": total_actual_units,
+        "Output gap": total_actual_units - total_expected_units,
+    }
+
+    # Reconcile the expected-productivity dataset
+    # with the complete shift output.
+
+    full_shift_units = float(
+        data.loc[
+            data["Hour"].isin(hours_list),
+            "Quantity of scanned"
+        ].sum()
+    )
+
+    excluded_units = full_shift_units - total_actual_units
+
+    expected_uph_summary["Full shift units"] = full_shift_units
+    expected_uph_summary["Excluded units"] = excluded_units
+    expected_uph_summary["Included worked hours"] = total_expected_hours
+
+    # Check whether expected productivity uses the same
+    # worked hours as the existing HC calculation.
+    if abs(total_expected_hours - float(total_worked_hours)) > 1e-6:
+        raise ValueError(
+            "Expected UPH worked-hours mismatch: "
+            f"{total_expected_hours:.4f} vs "
+            f"{float(total_worked_hours):.4f}"
+        )
+
+    # Make hourly labels consistent with the current report.
+    expected_uph_hourly["Hour label"] = (
+        expected_uph_hourly["Hour"]
+        .map(lambda h: f"{(int(h) - 1) % 24:02d}:00")
+    )
+
+    numeric_columns = [
+        "Worked hours",
+        "Actual units",
+        "Expected units",
+        "Expected UPH",
+        "Actual UPH",
+        "Achievement (%)",
+        "Output gap",
+    ]
+
+    expected_uph_hourly[numeric_columns] = (
+        expected_uph_hourly[numeric_columns].round(2)
+    )
+
     # Equivalent HC uses hours, not the average hourly headcount.
     week_operator_count = hours_by_group / report_work_hours
 
@@ -2533,12 +2709,14 @@ def calculate(data, data_employee, report_work_hours):
             "dashboard_report": dashboard_report,
             "rate_zone_report": rate_zone_report,
             "hc_final": hc_final,
+            "expected_uph_hourly": expected_uph_hourly,
             "station_report_display": station_report_display,
             "worst_rate": worst_rate,
             "packing_speed": packing_speed,
             "packing_speed_by_process": packing_speed_by_process,
             "packing_speed_by_line": packing_speed_by_line,
         },
+        "expected_uph": expected_uph_summary,
         "hours": hours_list,
         "night": bool(is_night_shift),
         "extended": bool(extended_shift),
